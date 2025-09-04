@@ -3,10 +3,47 @@ import os
 import tempfile
 import shutil
 from docx import Document
+from docx.document import Document as DocumentType
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+from docx.table import _Cell, Table
+from docx.text.paragraph import Paragraph
 from dotenv import load_dotenv
 import re
 
 load_dotenv()
+
+
+def iter_block_items(parent):
+    """
+    Generate a reference to each paragraph and table child within *parent*,
+    in document order. Each returned value is an instance of either Table or
+    Paragraph. *parent* would most commonly be a reference to a main
+    Document object, but also works for a _Cell object, which itself can
+    contain paragraphs and tables.
+    """
+    if isinstance(parent, DocumentType):
+        parent_elm = parent.element.body
+    elif isinstance(parent, _Cell):
+        parent_elm = parent._tc
+    else:
+        raise ValueError("something's not right")
+
+    for child in parent_elm.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, parent)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, parent)
+
+
+def get_paragraph_text_with_fields(paragraph):
+    """
+    Extract text from a paragraph, including MERGEFIELD placeholders.
+    """
+    text = ""
+    for run in paragraph.runs:
+        text += run.text
+    return text
 
 
 def convert_docx_via_libreoffice(input_docx_path, output_docx_path):
@@ -110,34 +147,35 @@ def convert_docx_via_libreoffice(input_docx_path, output_docx_path):
 
 def extract_content_with_python_docx(docx_path):
     """
-    Extract document content using python-docx library.
+    Extract document content using python-docx library with proper table handling.
     """
-    doc = Document(docx_path)
-    content_parts = []
+    document = Document(docx_path)
+    all_text = []
     placeholder_re = re.compile(r"\{\s*([^{}\s].*?)\s*\}")
     
-    # Extract paragraphs
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        if text:
-            # Replace placeholder braces with just the placeholder name
-            text = placeholder_re.sub(r'\1', text)
-            content_parts.append(text)
-    
-    # Extract table content
-    for table in doc.tables:
-        for row in table.rows:
-            row_text = []
-            for cell in row.cells:
-                cell_text = cell.text.strip()
-                if cell_text:
+    for block in iter_block_items(document):
+        if isinstance(block, Paragraph):
+            paragraph_text = get_paragraph_text_with_fields(block).strip()
+            if paragraph_text:
+                # Replace placeholder braces with just the placeholder name
+                paragraph_text = placeholder_re.sub(r'\1', paragraph_text)
+                all_text.append(paragraph_text)
+        elif isinstance(block, Table):
+            for row in block.rows:
+                row_text = []
+                for cell in row.cells:
+                    cell_text = ''
+                    for paragraph in cell.paragraphs:
+                        cell_text += get_paragraph_text_with_fields(paragraph)
                     # Replace placeholder braces with just the placeholder name
-                    cell_text = placeholder_re.sub(r'\1', cell_text)
+                    cell_text = placeholder_re.sub(r'\1', cell_text).strip()
                     row_text.append(cell_text)
-            if row_text:
-                content_parts.append(' | '.join(row_text))
+                # Join cell text with a tab to represent table columns
+                full_row_text = "\t".join(row_text).strip()
+                if full_row_text:
+                    all_text.append(full_row_text)
     
-    return '\n'.join(content_parts)
+    return '\n'.join(all_text)
 
 def main():
     input_file = "Master Approval Letter.docx"
