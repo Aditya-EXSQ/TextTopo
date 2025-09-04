@@ -1,5 +1,12 @@
 /.venv
 
+
+/DOCXToText/__pycache__
+/DOCXToText/Converters/__pycache__
+/DOCXToText/Extractors/__pycache__
+/DOCXToText/Pipeline/__pycache__
+
+
 *.docx
 *.doc
 *.pdf
@@ -11,5 +18,6 @@
 *.xls
 *.pptx
 *.ppt
+
 
 /Data
