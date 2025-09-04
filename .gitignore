@@ -1,1 +1,13 @@
 /.venv
+
+*.docx
+*.doc
+*.pdf
+*.txt
+*.xml
+*.json
+*.csv
+*.xlsx
+*.xls
+*.pptx
+*.ppt
