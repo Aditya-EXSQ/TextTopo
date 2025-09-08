@@ -5,7 +5,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
 from DOCXToText.config import ConversionConfig
-from DOCXToText.Converters.LibreOffice import convert_docx_via_libreoffice
+from DOCXToText.Converters.LibreOffice import convert_docx_via_libreoffice, convert_via_fake_doc_roundtrip
+from DOCXToText.Converters.Repair import repair_docx_strip_customxml
 from DOCXToText.Extractors.DOCXExtractor import extract_content_with_python_docx
 
 LOGGER = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: O
 
 	conversion_success = False
 	converted_used_path = input_docx_path
+	temp_repaired_path: Optional[str] = None
 
 	try:
 		conversion_success = convert_docx_via_libreoffice(input_docx_path, temp_converted_path, cfg=cfg)
@@ -35,7 +37,55 @@ def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: O
 		else:
 			LOGGER.info("Proceeding without conversion for: %s", input_docx_path)
 
-		content = extract_content_with_python_docx(converted_used_path)
+		try:
+			content = extract_content_with_python_docx(converted_used_path)
+		except Exception as first_exc:
+			# Fallback 1: strip customXml parts and retry
+			try:
+				fd, temp_repaired_path = tempfile.mkstemp(suffix=".docx")
+				os.close(fd)
+			except Exception:
+				temp_repaired_path = os.path.join(tempfile.gettempdir(), f"repaired_{os.path.basename(input_docx_path)}")
+
+			repaired = repair_docx_strip_customxml(converted_used_path, temp_repaired_path)
+			if repaired:
+				LOGGER.info("Retrying extraction after repair for: %s", input_docx_path)
+				try:
+					content = extract_content_with_python_docx(temp_repaired_path)
+				except Exception:
+					# Fallback 2: rename-trick roundtrip via LibreOffice
+					fd2 = None
+					try:
+						fd2, temp_converted_path2 = tempfile.mkstemp(suffix=".docx")
+						os.close(fd2)
+					except Exception:
+						temp_converted_path2 = os.path.join(tempfile.gettempdir(), f"rename_trick_{os.path.basename(input_docx_path)}")
+					if convert_via_fake_doc_roundtrip(converted_used_path, temp_converted_path2, cfg=cfg):
+						LOGGER.info("Retrying extraction after rename-trick for: %s", input_docx_path)
+						content = extract_content_with_python_docx(temp_converted_path2)
+						try:
+							os.remove(temp_converted_path2)
+						except Exception:
+							pass
+					else:
+						raise first_exc
+			else:
+				# If repair failed entirely, try rename-trick before giving up
+				fd2 = None
+				try:
+					fd2, temp_converted_path2 = tempfile.mkstemp(suffix=".docx")
+					os.close(fd2)
+				except Exception:
+					temp_converted_path2 = os.path.join(tempfile.gettempdir(), f"rename_trick_{os.path.basename(input_docx_path)}")
+				if convert_via_fake_doc_roundtrip(converted_used_path, temp_converted_path2, cfg=cfg):
+					LOGGER.info("Retrying extraction after rename-trick for: %s", input_docx_path)
+					content = extract_content_with_python_docx(temp_converted_path2)
+					try:
+						os.remove(temp_converted_path2)
+					except Exception:
+						pass
+				else:
+					raise first_exc
 
 		os.makedirs(os.path.dirname(output_txt_path) or ".", exist_ok=True)
 		with open(output_txt_path, "w", encoding="utf-8") as fh:
@@ -59,6 +109,12 @@ def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: O
 			try:
 				os.remove(temp_converted_path)
 				LOGGER.debug("Deleted temp converted file: %s", temp_converted_path)
+			except OSError:
+				pass
+		if temp_repaired_path and os.path.exists(temp_repaired_path):
+			try:
+				os.remove(temp_repaired_path)
+				LOGGER.debug("Deleted temp repaired file: %s", temp_repaired_path)
 			except OSError:
 				pass
 
