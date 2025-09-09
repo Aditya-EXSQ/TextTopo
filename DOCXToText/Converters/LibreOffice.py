@@ -109,29 +109,82 @@ async def convert_docx_via_libreoffice_async(input_docx_path: str, output_docx_p
 		LOGGER.warning("LibreOffice not found. Please install LibreOffice or set SOFFICE_PATH in .env file")
 		return False
 
-	# Create a temporary profile directory in current working directory
-	temp_profile_dir = tempfile.mkdtemp(prefix="textopo_lo_profile_", dir=".")
-	
-	try:
-		# Create temporary directory for conversion in current working directory
-		with tempfile.TemporaryDirectory(prefix="textopo_conversion_", dir=".") as temp_dir:
-			# Get the base name of the input file without extension
-			base_name = os.path.splitext(os.path.basename(input_docx_path))[0]
+	# Try two approaches: with custom profile and without
+	for attempt, use_profile in enumerate([(True, "with custom profile"), (False, "without custom profile")], 1):
+		use_custom_profile, approach_desc = use_profile
+		LOGGER.debug("Attempt %d: LibreOffice conversion %s", attempt, approach_desc)
+		
+		temp_profile_dir = None
+		if use_custom_profile:
+			# Create a temporary profile directory in current working directory
+			temp_profile_dir = tempfile.mkdtemp(prefix="textopo_lo_profile_", dir=".")
 			
-			# Step 1: Convert DOCX to DOC
-			doc_path = os.path.join(temp_dir, f"{base_name}.doc")
-			
-			LOGGER.debug("Converting DOCX to DOC with separate profile: %s", temp_profile_dir)
-			process1 = await asyncio.create_subprocess_exec(
-				soffice,
-				f"-env:UserInstallation=file://{temp_profile_dir}",
-				"--headless",
-				"--convert-to", "doc",
-				"--outdir", temp_dir,
-				input_docx_path,
-				stdout=asyncio.subprocess.PIPE,
-				stderr=asyncio.subprocess.PIPE
-			)
+			# Initialize the LibreOffice profile directory properly
+			try:
+				# Create the profile directory structure that LibreOffice expects
+				os.makedirs(os.path.join(temp_profile_dir, "user"), exist_ok=True)
+				os.makedirs(os.path.join(temp_profile_dir, "user", "config"), exist_ok=True)
+				
+				# Create a minimal bootstrap configuration
+				bootstrap_content = f"""[Bootstrap]
+UserInstallation=file:///{temp_profile_dir.replace(chr(92), '/')}
+"""
+				bootstrap_path = os.path.join(temp_profile_dir, "bootstrap.ini")
+				with open(bootstrap_path, "w", encoding="utf-8") as f:
+					f.write(bootstrap_content)
+					
+				LOGGER.debug("Initialized LibreOffice profile at: %s", temp_profile_dir)
+				
+			except Exception as profile_error:
+				LOGGER.warning("Failed to initialize LibreOffice profile: %s", profile_error)
+				# Try without custom profile on next attempt
+				if temp_profile_dir and os.path.exists(temp_profile_dir):
+					try:
+						shutil.rmtree(temp_profile_dir)
+					except:
+						pass
+				continue
+		
+		try:
+			# Create temporary directory for conversion in current working directory
+			with tempfile.TemporaryDirectory(prefix="textopo_conversion_", dir=".") as temp_dir:
+				# Get the base name of the input file without extension
+				base_name = os.path.splitext(os.path.basename(input_docx_path))[0]
+				
+				# Step 1: Convert DOCX to DOC
+				doc_path = os.path.join(temp_dir, f"{base_name}.doc")
+				
+				# Prepare LibreOffice command based on whether we use custom profile
+				if use_custom_profile:
+					LOGGER.debug("Converting DOCX to DOC with custom profile: %s", temp_profile_dir)
+					profile_uri = f"file:///{temp_profile_dir.replace(chr(92), '/')}"
+					cmd_args = [
+						soffice,
+						f"-env:UserInstallation={profile_uri}",
+						"--headless",
+						"--nodefault",
+						"--nolockcheck",
+						"--nologo",
+						"--norestore",
+						"--convert-to", "doc",
+						"--outdir", temp_dir,
+						input_docx_path
+					]
+				else:
+					LOGGER.debug("Converting DOCX to DOC with default profile")
+					cmd_args = [
+						soffice,
+						"--headless",
+						"--convert-to", "doc",
+						"--outdir", temp_dir,
+						input_docx_path
+					]
+				
+				process1 = await asyncio.create_subprocess_exec(
+					*cmd_args,
+					stdout=asyncio.subprocess.PIPE,
+					stderr=asyncio.subprocess.PIPE
+				)
 			
 			stdout1, stderr1 = await asyncio.wait_for(
 				process1.communicate(), 
@@ -149,17 +202,35 @@ async def convert_docx_via_libreoffice_async(input_docx_path: str, output_docx_p
 			if not os.path.exists(doc_path):
 				LOGGER.error("DOC file not created: %s", doc_path)
 				LOGGER.debug("Files in temp directory after step 1: %s", os.listdir(temp_dir))
-				return False
+				continue  # Try next approach
 			
 			# Step 2: Convert DOC back to DOCX
-			LOGGER.debug("Converting DOC back to DOCX with same profile")
+			if use_custom_profile:
+				LOGGER.debug("Converting DOC back to DOCX with custom profile")
+				cmd_args2 = [
+					soffice,
+					f"-env:UserInstallation={profile_uri}",
+					"--headless",
+					"--nodefault",
+					"--nolockcheck", 
+					"--nologo",
+					"--norestore",
+					"--convert-to", "docx",
+					"--outdir", temp_dir,
+					doc_path
+				]
+			else:
+				LOGGER.debug("Converting DOC back to DOCX with default profile")
+				cmd_args2 = [
+					soffice,
+					"--headless",
+					"--convert-to", "docx",
+					"--outdir", temp_dir,
+					doc_path
+				]
+			
 			process2 = await asyncio.create_subprocess_exec(
-				soffice,
-				f"-env:UserInstallation=file://{temp_profile_dir}",
-				"--headless", 
-				"--convert-to", "docx",
-				"--outdir", temp_dir,
-				doc_path,
+				*cmd_args2,
 				stdout=asyncio.subprocess.PIPE,
 				stderr=asyncio.subprocess.PIPE
 			)
@@ -174,7 +245,7 @@ async def convert_docx_via_libreoffice_async(input_docx_path: str, output_docx_p
 			
 			if process2.returncode != 0:
 				LOGGER.error("Error converting back to DOCX: %s", stderr2.decode().strip())
-				return False
+				continue  # Try next approach
 			
 			# Step 3: Delete the intermediate DOC file
 			if os.path.exists(doc_path):
@@ -186,25 +257,37 @@ async def convert_docx_via_libreoffice_async(input_docx_path: str, output_docx_p
 			if os.path.exists(converted_docx):
 				shutil.copy2(converted_docx, output_docx_path)
 				LOGGER.debug("Successfully converted and saved to: %s", output_docx_path)
+				# Success! Clean up and return
+				if temp_profile_dir and os.path.exists(temp_profile_dir):
+					try:
+						shutil.rmtree(temp_profile_dir)
+						LOGGER.debug("Cleaned up LibreOffice profile directory: %s", temp_profile_dir)
+					except Exception as cleanup_error:
+						LOGGER.warning("Failed to cleanup temp profile directory %s: %s", temp_profile_dir, cleanup_error)
 				return True
 			else:
 				LOGGER.error("Converted file not found: %s", converted_docx)
 				LOGGER.debug("Files in temp directory after step 2: %s", os.listdir(temp_dir))
-				return False
+				continue  # Try next approach
 				
-	except asyncio.TimeoutError:
-		LOGGER.error("Conversion timed out after %s seconds", cfg.convert_timeout_sec)
-		return False
-	except Exception as e:
-		LOGGER.exception("Error during conversion: %s", e)
-		return False
-	finally:
-		# Clean up the temporary profile directory
-		try:
-			shutil.rmtree(temp_profile_dir)
-			LOGGER.debug("Cleaned up LibreOffice profile directory: %s", temp_profile_dir)
-		except Exception as cleanup_error:
-			LOGGER.warning("Failed to cleanup temp profile directory %s: %s", temp_profile_dir, cleanup_error)
+		except asyncio.TimeoutError:
+			LOGGER.error("Conversion timed out after %s seconds", cfg.convert_timeout_sec)
+			continue  # Try next approach
+		except Exception as e:
+			LOGGER.warning("Error during conversion attempt %d: %s", attempt, e)
+			continue  # Try next approach
+		finally:
+			# Clean up the temporary profile directory for this attempt
+			if temp_profile_dir and os.path.exists(temp_profile_dir):
+				try:
+					shutil.rmtree(temp_profile_dir)
+					LOGGER.debug("Cleaned up LibreOffice profile directory: %s", temp_profile_dir)
+				except Exception as cleanup_error:
+					LOGGER.warning("Failed to cleanup temp profile directory %s: %s", temp_profile_dir, cleanup_error)
+	
+	# If we get here, all approaches failed
+	LOGGER.error("All LibreOffice conversion approaches failed")
+	return False
 
 def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cfg: Optional[ConversionConfig] = None) -> bool:
 	"""
