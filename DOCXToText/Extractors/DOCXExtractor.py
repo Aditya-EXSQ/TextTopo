@@ -1,6 +1,4 @@
 import re
-from typing import Union
-
 from docx import Document
 from docx.document import Document as DocumentType
 from docx.oxml.table import CT_Tbl

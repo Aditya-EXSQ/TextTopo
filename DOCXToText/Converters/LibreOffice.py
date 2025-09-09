@@ -20,20 +20,6 @@ def _windows_startupinfo():
 	return startupinfo
 
 
-_LO_PROFILE_DIR: Optional[str] = None
-
-
-def _get_lo_profile_dir() -> str:
-	"""Return a per-process LibreOffice user profile directory, reused across calls."""
-	global _LO_PROFILE_DIR
-	if _LO_PROFILE_DIR and os.path.isdir(_LO_PROFILE_DIR):
-		return _LO_PROFILE_DIR
-	# Create a stable path under system temp using PID to avoid cross-process clashes
-	pid = os.getpid()
-	base_dir = os.path.join(tempfile.gettempdir(), f"textopo_lo_profile_{pid}")
-	os.makedirs(base_dir, exist_ok=True)
-	_LO_PROFILE_DIR = base_dir
-	return _LO_PROFILE_DIR
 
 
 def _find_soffice_executable(cfg: ConversionConfig) -> Optional[str]:
@@ -105,7 +91,10 @@ def _find_soffice_executable(cfg: ConversionConfig) -> Optional[str]:
 
 
 def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cfg: Optional[ConversionConfig] = None) -> bool:
-	"""Convert DOCX->DOC->DOCX via LibreOffice to normalize shape."""
+	"""
+	Convert DOCX to DOC and back to DOCX using LibreOffice CLI to normalize the format.
+	This helps extract content that might not be accessible in the original format.
+	"""
 	cfg = cfg or ConversionConfig()
 	soffice = _find_soffice_executable(cfg)
 	if not soffice:
@@ -113,129 +102,86 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 		return False
 
 	try:
+		# Create temporary directory for conversion
 		with tempfile.TemporaryDirectory() as temp_dir:
+			# Get the base name of the input file without extension
 			base_name = os.path.splitext(os.path.basename(input_docx_path))[0]
+			
+			# Step 1: Convert DOCX to DOC
 			doc_path = os.path.join(temp_dir, f"{base_name}.doc")
-			# Use a persistent per-process user profile for speed
-			lo_profile = _get_lo_profile_dir()
-			lo_profile_uri = "file:///" + lo_profile.replace("\\", "/")
-
-			common_flags = ["--headless", "--norestore", f"-env:UserInstallation={lo_profile_uri}"]
-			cmd1 = [soffice, *common_flags, "--convert-to", "doc", "--outdir", temp_dir, input_docx_path]
-			LOGGER.info("Converting DOCX to DOC using LibreOffice...")
+			cmd1 = [
+				soffice,
+				"--headless",
+				"--convert-to", "doc",
+				"--outdir", temp_dir,
+				input_docx_path
+			]
+			
+			LOGGER.info("Converting DOCX to DOC...")
 			creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-			res1 = subprocess.run(
-				cmd1,
-				stdin=subprocess.DEVNULL,
-				capture_output=True,
-				text=True,
+			result1 = subprocess.run(
+				cmd1, 
+				capture_output=True, 
+				text=True, 
 				timeout=cfg.convert_timeout_sec,
 				creationflags=creationflags,
-				startupinfo=_windows_startupinfo(),
+				startupinfo=_windows_startupinfo()
 			)
-			if res1.returncode != 0:
-				LOGGER.error("DOCX->DOC conversion failed: %s", res1.stderr.strip())
+			if result1.returncode != 0:
+				LOGGER.error("Error converting to DOC: %s", result1.stderr)
 				return False
-
+			
+			# Check if DOC file was created
 			if not os.path.exists(doc_path):
-				LOGGER.error("DOC not created at: %s", doc_path)
+				LOGGER.error("DOC file not created: %s", doc_path)
 				return False
-
-			cmd2 = [soffice, *common_flags, "--convert-to", "docx", "--outdir", temp_dir, doc_path]
-			LOGGER.info("Converting DOC back to DOCX using LibreOffice...")
-			res2 = subprocess.run(
-				cmd2,
-				stdin=subprocess.DEVNULL,
-				capture_output=True,
-				text=True,
+			
+			# Step 2: Convert DOC back to DOCX
+			cmd2 = [
+				soffice,
+				"--headless", 
+				"--convert-to", "docx",
+				"--outdir", temp_dir,
+				doc_path
+			]
+			
+			LOGGER.info("Converting DOC back to DOCX...")
+			result2 = subprocess.run(
+				cmd2, 
+				capture_output=True, 
+				text=True, 
 				timeout=cfg.convert_timeout_sec,
 				creationflags=creationflags,
-				startupinfo=_windows_startupinfo(),
+				startupinfo=_windows_startupinfo()
 			)
-			if res2.returncode != 0:
-				LOGGER.error("DOC->DOCX conversion failed: %s", res2.stderr.strip())
+			if result2.returncode != 0:
+				LOGGER.error("Error converting back to DOCX: %s", result2.stderr)
 				return False
-
-			try:
-				if os.path.exists(doc_path):
-					os.remove(doc_path)
-					LOGGER.debug("Deleted intermediate DOC: %s", doc_path)
-			except OSError:
-				pass
-
+			
+			# Step 3: Delete the intermediate DOC file
+			if os.path.exists(doc_path):
+				os.remove(doc_path)
+				LOGGER.debug("Deleted intermediate DOC file")
+			
+			# Step 4: Copy the converted file to output location
 			converted_docx = os.path.join(temp_dir, f"{base_name}.docx")
-			if not os.path.exists(converted_docx):
-				LOGGER.error("Converted DOCX not found: %s", converted_docx)
+			if os.path.exists(converted_docx):
+				shutil.copy2(converted_docx, output_docx_path)
+				LOGGER.info("Successfully converted and saved to: %s", output_docx_path)
+				return True
+			else:
+				LOGGER.error("Converted file not found: %s", converted_docx)
+				# List files in temp directory for debugging
+				LOGGER.debug("Files in temp directory: %s", os.listdir(temp_dir))
 				return False
-
-			shutil.copy2(converted_docx, output_docx_path)
-			LOGGER.debug("Converted file saved to: %s", output_docx_path)
-			return True
-
+				
 	except subprocess.TimeoutExpired:
-		LOGGER.error("LibreOffice conversion timed out")
+		LOGGER.error("Conversion timed out")
 		return False
-	except Exception as exc:
-		LOGGER.exception("Unexpected error during LibreOffice conversion: %s", exc)
-		return False
-
-
-def convert_via_fake_doc_roundtrip(input_docx_path: str, output_docx_path: str, cfg: Optional[ConversionConfig] = None) -> bool:
-	"""
-	Rename trick fallback: copy the DOCX bytes to a temporary path with a .doc extension
-	and ask LibreOffice to convert that .doc directly to .docx.
-
-	This mimics the manual rename you performed and sometimes bypasses broken
-	customXml references encountered by python-docx.
-	"""
-	cfg = cfg or ConversionConfig()
-	soffice = _find_soffice_executable(cfg)
-	if not soffice:
-		LOGGER.warning("LibreOffice not found. Install it or set SOFFICE_PATH.")
+	except Exception as e:
+		LOGGER.error("Error during conversion: %s", e)
 		return False
 
-	try:
-		with tempfile.TemporaryDirectory() as temp_dir:
-			base_name = os.path.splitext(os.path.basename(input_docx_path))[0]
-			fake_doc_path = os.path.join(temp_dir, f"{base_name}.doc")
-			# Copy bytes verbatim, only the extension changes
-			shutil.copy2(input_docx_path, fake_doc_path)
 
-			# Use a persistent per-process user profile for speed
-			lo_profile = _get_lo_profile_dir()
-			lo_profile_uri = "file:///" + lo_profile.replace("\\", "/")
-
-			common_flags = ["--headless", "--norestore", f"-env:UserInstallation={lo_profile_uri}"]
-			creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-			cmd = [soffice, *common_flags, "--convert-to", "docx", "--outdir", temp_dir, fake_doc_path]
-			LOGGER.info("Converting fake .doc to .docx using LibreOffice (rename trick)...")
-			res = subprocess.run(
-				cmd,
-				stdin=subprocess.DEVNULL,
-				capture_output=True,
-				text=True,
-				timeout=cfg.convert_timeout_sec,
-				creationflags=creationflags,
-				startupinfo=_windows_startupinfo(),
-			)
-			if res.returncode != 0:
-				LOGGER.error("Fake .doc -> .docx conversion failed: %s", res.stderr.strip())
-				return False
-
-			converted_docx = os.path.join(temp_dir, f"{base_name}.docx")
-			if not os.path.exists(converted_docx):
-				LOGGER.error("Converted DOCX not found after rename trick: %s", converted_docx)
-				return False
-
-			shutil.copy2(converted_docx, output_docx_path)
-			LOGGER.debug("Rename-trick converted file saved to: %s", output_docx_path)
-			return True
-
-	except subprocess.TimeoutExpired:
-		LOGGER.error("LibreOffice rename-trick conversion timed out")
-		return False
-	except Exception as exc:
-		LOGGER.exception("Unexpected error during rename-trick conversion: %s", exc)
-		return False
 
 

@@ -5,95 +5,80 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
 from DOCXToText.config import ConversionConfig
-from DOCXToText.Converters.LibreOffice import convert_docx_via_libreoffice, convert_via_fake_doc_roundtrip
-from DOCXToText.Converters.Repair import repair_docx_strip_customxml
+from DOCXToText.Converters.LibreOffice import convert_docx_via_libreoffice
 from DOCXToText.Extractors.DOCXExtractor import extract_content_with_python_docx
 
 LOGGER = logging.getLogger(__name__)
 
 
 def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: Optional[ConversionConfig] = None) -> bool:
-	"""Normalize via LibreOffice (if available) and extract text to .txt file."""
+	"""
+	Extract DOCX document content using the clean two-step process:
+	1. Try LibreOffice conversion for document normalization (optional)
+	2. Extract text using python-docx
+	"""
 	cfg = cfg or ConversionConfig()
-
+	
+	LOGGER.info("=== DOCUMENT CONTENT EXTRACTION WITH LIBREOFFICE CONVERSION ===")
+	
+	# Check if input file exists
+	if not os.path.isfile(input_docx_path):
+		LOGGER.error("Input file not found: %s", input_docx_path)
+		return False
+	
 	# Prepare temp path for converted docx
-	temp_converted_fd = None
-	temp_converted_path: Optional[str] = None
-	try:
-		temp_converted_fd, temp_converted_path = tempfile.mkstemp(suffix=".docx")
-		os.close(temp_converted_fd)
-	except Exception:
-		temp_converted_fd = None
-		temp_converted_path = os.path.join(tempfile.gettempdir(), f"converted_{os.path.basename(input_docx_path)}")
-
+	temp_converted_path = None
 	conversion_success = False
-	converted_used_path = input_docx_path
-	temp_repaired_path: Optional[str] = None
-
+	converted_file = input_docx_path
+	
 	try:
-		conversion_success = convert_docx_via_libreoffice(input_docx_path, temp_converted_path, cfg=cfg)
-		if conversion_success:
-			converted_used_path = temp_converted_path
-		else:
-			LOGGER.info("Proceeding without conversion for: %s", input_docx_path)
-
+		# Step 1: Convert DOCX via LibreOffice
+		LOGGER.info("Step 1: Converting document via LibreOffice...")
 		try:
-			content = extract_content_with_python_docx(converted_used_path)
-		except Exception as first_exc:
-			# Fallback 1: strip customXml parts and retry
-			try:
-				fd, temp_repaired_path = tempfile.mkstemp(suffix=".docx")
-				os.close(fd)
-			except Exception:
-				temp_repaired_path = os.path.join(tempfile.gettempdir(), f"repaired_{os.path.basename(input_docx_path)}")
-
-			repaired = repair_docx_strip_customxml(converted_used_path, temp_repaired_path)
-			if repaired:
-				LOGGER.info("Retrying extraction after repair for: %s", input_docx_path)
-				try:
-					content = extract_content_with_python_docx(temp_repaired_path)
-				except Exception:
-					# Fallback 2: rename-trick roundtrip via LibreOffice
-					fd2 = None
-					try:
-						fd2, temp_converted_path2 = tempfile.mkstemp(suffix=".docx")
-						os.close(fd2)
-					except Exception:
-						temp_converted_path2 = os.path.join(tempfile.gettempdir(), f"rename_trick_{os.path.basename(input_docx_path)}")
-					if convert_via_fake_doc_roundtrip(converted_used_path, temp_converted_path2, cfg=cfg):
-						LOGGER.info("Retrying extraction after rename-trick for: %s", input_docx_path)
-						content = extract_content_with_python_docx(temp_converted_path2)
-						try:
-							os.remove(temp_converted_path2)
-						except Exception:
-							pass
-					else:
-						raise first_exc
+			temp_converted_path = tempfile.mktemp(suffix=".docx")
+			conversion_success = convert_docx_via_libreoffice(input_docx_path, temp_converted_path, cfg=cfg)
+			if conversion_success:
+				LOGGER.info("✅ Conversion successful!")
+				converted_file = temp_converted_path
 			else:
-				# If repair failed entirely, try rename-trick before giving up
-				fd2 = None
-				try:
-					fd2, temp_converted_path2 = tempfile.mkstemp(suffix=".docx")
-					os.close(fd2)
-				except Exception:
-					temp_converted_path2 = os.path.join(tempfile.gettempdir(), f"rename_trick_{os.path.basename(input_docx_path)}")
-				if convert_via_fake_doc_roundtrip(converted_used_path, temp_converted_path2, cfg=cfg):
-					LOGGER.info("Retrying extraction after rename-trick for: %s", input_docx_path)
-					content = extract_content_with_python_docx(temp_converted_path2)
-					try:
-						os.remove(temp_converted_path2)
-					except Exception:
-						pass
-				else:
-					raise first_exc
-
+				LOGGER.info("❌ Conversion failed, trying to extract from original file...")
+				converted_file = input_docx_path
+		except Exception as e:
+			LOGGER.error("❌ Conversion error: %s", e)
+			LOGGER.info("Falling back to original file...")
+			converted_file = input_docx_path
+		
+		# Step 2: Extract content using python-docx
+		LOGGER.info("Step 2: Extracting content...")
+		try:
+			content = extract_content_with_python_docx(converted_file)
+			if content.strip():
+				LOGGER.info("✅ Content extraction successful!")
+			else:
+				LOGGER.warning("⚠️ Content extraction completed but no text was found")
+				LOGGER.info("The document might be empty or contain only images/formatted content")
+			
+		except Exception as e:
+			LOGGER.error("❌ Error extracting content: %s", e)
+			LOGGER.error("This might be due to:")
+			LOGGER.error("  - Corrupted document file")
+			LOGGER.error("  - Unsupported document format")
+			LOGGER.error("  - Missing python-docx library")
+			raise
+		
+		# Save extracted content
 		os.makedirs(os.path.dirname(output_txt_path) or ".", exist_ok=True)
 		with open(output_txt_path, "w", encoding="utf-8") as fh:
 			fh.write(content or "")
-
-		LOGGER.info("Extracted %s -> %s", input_docx_path, output_txt_path)
+		
+		LOGGER.info("📁 Extracted text saved to: %s", output_txt_path)
+		
+		# Note about LibreOffice
+		if not conversion_success:
+			LOGGER.info("💡 Tip: Install LibreOffice to enable document conversion for better text extraction")
+		
 		return True
-
+		
 	except Exception as exc:
 		LOGGER.exception("Failed to extract '%s' -> '%s': %s", input_docx_path, output_txt_path, exc)
 		try:
@@ -103,18 +88,13 @@ def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: O
 		except Exception:
 			pass
 		return False
-
+	
 	finally:
+		# Clean up temporary converted file
 		if conversion_success and temp_converted_path and os.path.exists(temp_converted_path):
 			try:
 				os.remove(temp_converted_path)
 				LOGGER.debug("Deleted temp converted file: %s", temp_converted_path)
-			except OSError:
-				pass
-		if temp_repaired_path and os.path.exists(temp_repaired_path):
-			try:
-				os.remove(temp_repaired_path)
-				LOGGER.debug("Deleted temp repaired file: %s", temp_repaired_path)
 			except OSError:
 				pass
 
