@@ -40,7 +40,8 @@ def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: O
 		# Step 1: Convert DOCX via LibreOffice
 		LOGGER.debug("Step 1: Converting document via LibreOffice...")
 		try:
-			temp_converted_path = tempfile.mktemp(suffix=".docx")
+			# Create temp file in current working directory for easier debugging
+			temp_converted_path = tempfile.mktemp(suffix=".docx", dir=".")
 			conversion_success = convert_docx_via_libreoffice(input_docx_path, temp_converted_path, cfg=cfg)
 			if conversion_success:
 				LOGGER.debug("✅ Conversion successful!")

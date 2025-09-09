@@ -109,12 +109,12 @@ async def convert_docx_via_libreoffice_async(input_docx_path: str, output_docx_p
 		LOGGER.warning("LibreOffice not found. Please install LibreOffice or set SOFFICE_PATH in .env file")
 		return False
 
-	# Create a temporary profile directory for this LibreOffice instance
-	temp_profile_dir = tempfile.mkdtemp(prefix="textopo_lo_profile_")
+	# Create a temporary profile directory in current working directory
+	temp_profile_dir = tempfile.mkdtemp(prefix="textopo_lo_profile_", dir=".")
 	
 	try:
-		# Create temporary directory for conversion
-		with tempfile.TemporaryDirectory() as temp_dir:
+		# Create temporary directory for conversion in current working directory
+		with tempfile.TemporaryDirectory(prefix="textopo_conversion_", dir=".") as temp_dir:
 			# Get the base name of the input file without extension
 			base_name = os.path.splitext(os.path.basename(input_docx_path))[0]
 			
