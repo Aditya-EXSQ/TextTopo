@@ -60,6 +60,11 @@ def _find_soffice_executable(cfg: ConversionConfig) -> Optional[str]:
 	
 	# Add common LibreOffice installation paths
 	candidates.extend([
+		# Try portable LibreOffice first (more reliable)
+		r"C:\LibreOfficePortable\App\LibreOffice\program\soffice.exe",
+		r".\LibreOffice\program\soffice.exe",
+		r"LibreOffice\program\soffice.exe",
+		# Standard installations
 		r"C:\Program Files\LibreOffice\program\soffice.exe",
 		r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
 		r"C:\Program Files\LibreOffice\program\soffice.com",

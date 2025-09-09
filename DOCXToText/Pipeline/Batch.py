@@ -49,7 +49,13 @@ def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: O
 				LOGGER.info("❌ Conversion failed, trying to extract from original file...")
 				converted_file = input_docx_path
 		except Exception as e:
-			LOGGER.warning("❌ Conversion error: %s", e)
+			error_msg = str(e).lower()
+			if "bootstrap.ini" in error_msg or "corrupt" in error_msg:
+				LOGGER.error("❌ LibreOffice installation is corrupted (bootstrap.ini issue)")
+				LOGGER.error("💡 Please repair LibreOffice: Settings → Apps → LibreOffice → Repair")
+				LOGGER.info("📄 Continuing with original file extraction...")
+			else:
+				LOGGER.warning("❌ Conversion error: %s", e)
 			LOGGER.debug("Falling back to original file...")
 			converted_file = input_docx_path
 		
