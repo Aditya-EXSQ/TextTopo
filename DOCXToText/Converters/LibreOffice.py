@@ -3,75 +3,12 @@ import os
 import shutil
 import subprocess
 import tempfile
-import time
-try:
-    import fcntl
-except ImportError:
-    fcntl = None
+import asyncio
 from typing import List, Optional
 
 from DOCXToText.config import ConversionConfig
 
 LOGGER = logging.getLogger(__name__)
-
-
-# Global file lock to completely serialize LibreOffice operations
-_libreoffice_lock_fd = None
-_libreoffice_lock_file = os.path.join(tempfile.gettempdir(), "textopo_libreoffice_global.lock")
-
-def _acquire_global_libreoffice_lock(timeout_seconds: int = 300):
-	"""Acquire a global file lock for LibreOffice operations."""
-	global _libreoffice_lock_fd
-	start_time = time.time()
-	
-	while time.time() - start_time < timeout_seconds:
-		try:
-			# Try to create/open the lock file exclusively
-			_libreoffice_lock_fd = os.open(_libreoffice_lock_file, 
-										   os.O_CREAT | os.O_TRUNC | os.O_RDWR)
-			
-			if os.name != 'nt' and fcntl:
-				# Unix-style file locking
-				fcntl.flock(_libreoffice_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-			else:
-				# Windows - just use the file existence as lock
-				pass
-				
-			# Write PID to lock file for debugging
-			os.write(_libreoffice_lock_fd, f"LibreOffice lock - PID: {os.getpid()}\n".encode())
-			LOGGER.debug("Acquired global LibreOffice lock")
-			return True
-			
-		except (OSError, IOError):
-			# Lock is held by another process, wait and retry
-			if _libreoffice_lock_fd:
-				try:
-					os.close(_libreoffice_lock_fd)
-				except:
-					pass
-				_libreoffice_lock_fd = None
-			time.sleep(0.5)
-	
-	LOGGER.warning("Failed to acquire LibreOffice lock within %d seconds", timeout_seconds)
-	return False
-
-def _release_global_libreoffice_lock():
-	"""Release the global LibreOffice lock."""
-	global _libreoffice_lock_fd
-	if _libreoffice_lock_fd:
-		try:
-			if os.name != 'nt' and fcntl:
-				fcntl.flock(_libreoffice_lock_fd, fcntl.LOCK_UN)
-			os.close(_libreoffice_lock_fd)
-			_libreoffice_lock_fd = None
-		except:
-			pass
-		
-		try:
-			os.remove(_libreoffice_lock_file)
-			LOGGER.debug("Released global LibreOffice lock")
-		except:
-			pass
 
 
 def _windows_startupinfo():
@@ -156,13 +93,10 @@ def _find_soffice_executable(cfg: ConversionConfig) -> Optional[str]:
 	return None
 
 
-def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cfg: Optional[ConversionConfig] = None, max_instances: int = None) -> bool:
+async def convert_docx_via_libreoffice_async(input_docx_path: str, output_docx_path: str, cfg: Optional[ConversionConfig] = None) -> bool:
 	"""
-	Convert DOCX to DOC and back to DOCX using LibreOffice CLI to normalize the format.
-	This helps extract content that might not be accessible in the original format.
-	
-	NOTE: LibreOffice conversion is completely serialized (one at a time globally) 
-	because LibreOffice cannot handle any parallel processing whatsoever.
+	Convert DOCX to DOC and back to DOCX using LibreOffice CLI with separate user profiles.
+	This approach uses asyncio subprocess and unique LibreOffice profiles to avoid conflicts.
 	"""
 	cfg = cfg or ConversionConfig()
 	soffice = _find_soffice_executable(cfg)
@@ -170,13 +104,10 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 		LOGGER.warning("LibreOffice not found. Please install LibreOffice or set SOFFICE_PATH in .env file")
 		return False
 
-	# Acquire global file lock - only one LibreOffice conversion at a time, EVER
-	if not _acquire_global_libreoffice_lock(timeout_seconds=cfg.convert_timeout_sec * 3):
-		LOGGER.error("Could not acquire LibreOffice lock - another conversion in progress")
-		return False
+	# Create a temporary profile directory for this LibreOffice instance
+	temp_profile_dir = tempfile.mkdtemp(prefix="textopo_lo_profile_")
 	
 	try:
-		
 		# Create temporary directory for conversion
 		with tempfile.TemporaryDirectory() as temp_dir:
 			# Get the base name of the input file without extension
@@ -184,63 +115,60 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 			
 			# Step 1: Convert DOCX to DOC
 			doc_path = os.path.join(temp_dir, f"{base_name}.doc")
-			cmd1 = [
+			
+			LOGGER.debug("Converting DOCX to DOC with separate profile: %s", temp_profile_dir)
+			process1 = await asyncio.create_subprocess_exec(
 				soffice,
+				f"-env:UserInstallation=file://{temp_profile_dir}",
 				"--headless",
 				"--convert-to", "doc",
 				"--outdir", temp_dir,
-				input_docx_path
-			]
+				input_docx_path,
+				stdout=asyncio.subprocess.PIPE,
+				stderr=asyncio.subprocess.PIPE
+			)
 			
-			LOGGER.debug("Converting DOCX to DOC with command: %s", ' '.join(cmd1))
-			creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-			result1 = subprocess.run(
-				cmd1, 
-				capture_output=True, 
-				text=True, 
-				timeout=cfg.convert_timeout_sec,
-				creationflags=creationflags,
-				startupinfo=_windows_startupinfo()
+			stdout1, stderr1 = await asyncio.wait_for(
+				process1.communicate(), 
+				timeout=cfg.convert_timeout_sec
 			)
 			
 			LOGGER.debug("DOCX->DOC conversion result: returncode=%s, stdout='%s', stderr='%s'", 
-						result1.returncode, result1.stdout.strip(), result1.stderr.strip())
+						process1.returncode, stdout1.decode().strip(), stderr1.decode().strip())
 			
-			if result1.returncode != 0:
-				LOGGER.error("Error converting to DOC: %s", result1.stderr)
+			if process1.returncode != 0:
+				LOGGER.error("Error converting to DOC: %s", stderr1.decode().strip())
 				return False
 			
 			# Check if DOC file was created
 			if not os.path.exists(doc_path):
 				LOGGER.error("DOC file not created: %s", doc_path)
-				# List files in temp directory for debugging
 				LOGGER.debug("Files in temp directory after step 1: %s", os.listdir(temp_dir))
 				return False
 			
 			# Step 2: Convert DOC back to DOCX
-			cmd2 = [
+			LOGGER.debug("Converting DOC back to DOCX with same profile")
+			process2 = await asyncio.create_subprocess_exec(
 				soffice,
+				f"-env:UserInstallation=file://{temp_profile_dir}",
 				"--headless", 
 				"--convert-to", "docx",
 				"--outdir", temp_dir,
-				doc_path
-			]
+				doc_path,
+				stdout=asyncio.subprocess.PIPE,
+				stderr=asyncio.subprocess.PIPE
+			)
 			
-			LOGGER.debug("Converting DOC back to DOCX with command: %s", ' '.join(cmd2))
-			result2 = subprocess.run(
-				cmd2, 
-				capture_output=True, 
-				text=True, 
-				timeout=cfg.convert_timeout_sec,
-				creationflags=creationflags,
-				startupinfo=_windows_startupinfo()
+			stdout2, stderr2 = await asyncio.wait_for(
+				process2.communicate(),
+				timeout=cfg.convert_timeout_sec
 			)
 			
 			LOGGER.debug("DOC->DOCX conversion result: returncode=%s, stdout='%s', stderr='%s'", 
-						result2.returncode, result2.stdout.strip(), result2.stderr.strip())
+						process2.returncode, stdout2.decode().strip(), stderr2.decode().strip())
 			
-			if result2.returncode != 0:
-				LOGGER.error("Error converting back to DOCX: %s", result2.stderr)
+			if process2.returncode != 0:
+				LOGGER.error("Error converting back to DOCX: %s", stderr2.decode().strip())
 				return False
 			
 			# Step 3: Delete the intermediate DOC file
@@ -256,19 +184,45 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 				return True
 			else:
 				LOGGER.error("Converted file not found: %s", converted_docx)
-				# List files in temp directory for debugging
 				LOGGER.debug("Files in temp directory after step 2: %s", os.listdir(temp_dir))
 				return False
 				
-	except subprocess.TimeoutExpired:
+	except asyncio.TimeoutError:
 		LOGGER.error("Conversion timed out after %s seconds", cfg.convert_timeout_sec)
 		return False
 	except Exception as e:
 		LOGGER.exception("Error during conversion: %s", e)
 		return False
 	finally:
-		# Always release the global lock
-		_release_global_libreoffice_lock()
+		# Clean up the temporary profile directory
+		try:
+			shutil.rmtree(temp_profile_dir)
+			LOGGER.debug("Cleaned up LibreOffice profile directory: %s", temp_profile_dir)
+		except Exception as cleanup_error:
+			LOGGER.warning("Failed to cleanup temp profile directory %s: %s", temp_profile_dir, cleanup_error)
+
+def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cfg: Optional[ConversionConfig] = None) -> bool:
+	"""
+	Synchronous wrapper for async LibreOffice conversion.
+	Creates an event loop to run the async conversion.
+	"""
+	try:
+		# Try to get the current event loop
+		loop = asyncio.get_event_loop()
+		if loop.is_running():
+			# If we're in an async context, we need to run in a thread
+			import concurrent.futures
+			with concurrent.futures.ThreadPoolExecutor() as executor:
+				future = executor.submit(
+					lambda: asyncio.run(convert_docx_via_libreoffice_async(input_docx_path, output_docx_path, cfg))
+				)
+				return future.result()
+		else:
+			# We can run directly
+			return asyncio.run(convert_docx_via_libreoffice_async(input_docx_path, output_docx_path, cfg))
+	except RuntimeError:
+		# No event loop exists, create one
+		return asyncio.run(convert_docx_via_libreoffice_async(input_docx_path, output_docx_path, cfg))
 
 
 
