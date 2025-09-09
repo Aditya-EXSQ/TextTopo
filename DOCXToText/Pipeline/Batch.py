@@ -72,11 +72,14 @@ def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: O
 		with open(output_txt_path, "w", encoding="utf-8") as fh:
 			fh.write(content or "")
 		
-		LOGGER.info("📁 Extracted text saved to: %s", output_txt_path)
+		LOGGER.info("✅ Successfully extracted: %s -> %s (%d chars)", 
+				   os.path.basename(input_docx_path), 
+				   os.path.basename(output_txt_path),
+				   len(content))
 		
 		# Note about LibreOffice
 		if not conversion_success:
-			LOGGER.info("💡 Tip: Install LibreOffice to enable document conversion for better text extraction")
+			LOGGER.debug("💡 Tip: Install LibreOffice to enable document conversion for better text extraction")
 		
 		return True
 		
