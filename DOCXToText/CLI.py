@@ -19,7 +19,6 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
 	parser.add_argument("--soffice", type=str, default=os.getenv("SOFFICE_PATH"), help="Path to LibreOffice soffice executable.")
 	parser.add_argument("--convert-timeout-sec", type=int, default=int(os.getenv("CONVERT_TIMEOUT_SEC", "60")), help="Timeout for each conversion step.")
 	parser.add_argument("--version-timeout-sec", type=int, default=int(os.getenv("VERSION_TIMEOUT_SEC", "10")), help="Timeout when probing LibreOffice version.")
-	parser.add_argument("--workers", type=int, default=int(os.getenv("WORKERS", "1")), help="Number of parallel worker processes for folder processing.")
 	parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (repeat for more detail, e.g. -vv).")
 
 	args = parser.parse_args(argv)
@@ -51,7 +50,7 @@ def main(argv: Optional[list] = None) -> int:
 			return 0 if ok else 1
 
 		if args.input_folder:
-			count = process_docx_folder(args.input_folder, args.output_folder, cfg=cfg, workers=args.workers)
+			count = process_docx_folder(args.input_folder, args.output_folder, cfg=cfg)
 			return 0 if count > 0 else 1
 
 	except ValueError as ve:

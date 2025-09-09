@@ -1,7 +1,6 @@
 import logging
 import os
 import tempfile
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
 from DOCXToText.config import ConversionConfig
@@ -115,14 +114,8 @@ def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: O
 				pass
 
 
-def _process_single_file(args: Tuple[str, str, ConversionConfig]) -> Tuple[str, bool]:
-	input_path, output_txt, cfg = args
-	ok = extract_docx_to_text_file(input_path, output_txt, cfg=cfg)
-	return (output_txt, ok)
-
-
-def process_docx_folder(input_folder: str, output_folder: Optional[str] = None, cfg: Optional[ConversionConfig] = None, workers: int = 1) -> int:
-	"""Process all .docx files in a folder with optional multiprocessing."""
+def process_docx_folder(input_folder: str, output_folder: Optional[str] = None, cfg: Optional[ConversionConfig] = None) -> int:
+	"""Process all .docx files in a folder sequentially."""
 	if not os.path.isdir(input_folder):
 		raise ValueError(f"Input folder not found: {input_folder}")
 
@@ -130,7 +123,7 @@ def process_docx_folder(input_folder: str, output_folder: Optional[str] = None, 
 	output_dir = output_folder or input_folder
 	os.makedirs(output_dir, exist_ok=True)
 
-	tasks: List[Tuple[str, str, ConversionConfig]] = []
+	tasks: List[Tuple[str, str]] = []
 	for name in os.listdir(input_folder):
 		if not name.lower().endswith(".docx"):
 			continue
@@ -139,32 +132,17 @@ def process_docx_folder(input_folder: str, output_folder: Optional[str] = None, 
 		input_path = os.path.join(input_folder, name)
 		base_name = os.path.splitext(name)[0]
 		output_txt = os.path.join(output_dir, f"{base_name}.txt")
-		# LibreOffice is now completely single-threaded globally
-		tasks.append((input_path, output_txt, cfg))
+		tasks.append((input_path, output_txt))
 
 	if not tasks:
 		LOGGER.info("No DOCX files found in '%s'.", input_folder)
 		return 0
 
 	processed = 0
-	workers = max(1, int(workers or 1))
-	if workers == 1:
-		for t in tasks:
-			_, ok = _process_single_file(t)
-			if ok:
-				processed += 1
-	else:
-		LOGGER.info("Processing %d files with %d workers...", len(tasks), workers)
-		with ProcessPoolExecutor(max_workers=workers) as executor:
-			future_to_task = {executor.submit(_process_single_file, t): t for t in tasks}
-			for future in as_completed(future_to_task):
-				try:
-					_, ok = future.result()
-					if ok:
-						processed += 1
-				except Exception as exc:
-					task = future_to_task[future]
-					LOGGER.exception("Error processing file '%s': %s", task[0], exc)
+	for input_path, output_txt in tasks:
+		ok = extract_docx_to_text_file(input_path, output_txt, cfg=cfg)
+		if ok:
+			processed += 1
 
 	LOGGER.info("Processed %d/%d DOCX file(s) from '%s' into '%s'.", processed, len(tasks), input_folder, output_dir)
 	return processed
