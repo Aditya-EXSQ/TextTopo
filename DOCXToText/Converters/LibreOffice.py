@@ -56,13 +56,15 @@ def _find_soffice_executable(cfg: ConversionConfig) -> Optional[str]:
 			])
 		else:
 			candidates.append(cfg.soffice_path)
+	
+	# Add common LibreOffice installation paths
 	candidates.extend([
-		r"C:\\Program Files\\LibreOffice\\program\\soffice.exe",
-		r"C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe",
-		r"C:\\Program Files\\LibreOffice\\program\\soffice.com",
-		r"C:\\Program Files (x86)\\LibreOffice\\program\\soffice.com",
-		r"C:\\Program Files\\LibreOffice\\program\\soffice.bin",
-		r"C:\\Program Files (x86)\\LibreOffice\\program\\soffice.bin",
+		r"C:\Program Files\LibreOffice\program\soffice.exe",
+		r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+		r"C:\Program Files\LibreOffice\program\soffice.com",
+		r"C:\Program Files (x86)\LibreOffice\program\soffice.com",
+		r"C:\Program Files\LibreOffice\program\soffice.bin",
+		r"C:\Program Files (x86)\LibreOffice\program\soffice.bin",
 		"soffice",
 		"libreoffice",
 	])
@@ -98,7 +100,7 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 	cfg = cfg or ConversionConfig()
 	soffice = _find_soffice_executable(cfg)
 	if not soffice:
-		LOGGER.warning("LibreOffice not found. Install it or set SOFFICE_PATH.")
+		LOGGER.warning("LibreOffice not found. Please install LibreOffice or set SOFFICE_PATH in .env file")
 		return False
 
 	try:
@@ -117,7 +119,7 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 				input_docx_path
 			]
 			
-			LOGGER.info("Converting DOCX to DOC...")
+			LOGGER.debug("Converting DOCX to DOC with command: %s", ' '.join(cmd1))
 			creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 			result1 = subprocess.run(
 				cmd1, 
@@ -127,6 +129,10 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 				creationflags=creationflags,
 				startupinfo=_windows_startupinfo()
 			)
+			
+			LOGGER.debug("DOCX->DOC conversion result: returncode=%s, stdout='%s', stderr='%s'", 
+						result1.returncode, result1.stdout.strip(), result1.stderr.strip())
+			
 			if result1.returncode != 0:
 				LOGGER.error("Error converting to DOC: %s", result1.stderr)
 				return False
@@ -134,6 +140,8 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 			# Check if DOC file was created
 			if not os.path.exists(doc_path):
 				LOGGER.error("DOC file not created: %s", doc_path)
+				# List files in temp directory for debugging
+				LOGGER.debug("Files in temp directory after step 1: %s", os.listdir(temp_dir))
 				return False
 			
 			# Step 2: Convert DOC back to DOCX
@@ -145,7 +153,7 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 				doc_path
 			]
 			
-			LOGGER.info("Converting DOC back to DOCX...")
+			LOGGER.debug("Converting DOC back to DOCX with command: %s", ' '.join(cmd2))
 			result2 = subprocess.run(
 				cmd2, 
 				capture_output=True, 
@@ -154,6 +162,10 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 				creationflags=creationflags,
 				startupinfo=_windows_startupinfo()
 			)
+			
+			LOGGER.debug("DOC->DOCX conversion result: returncode=%s, stdout='%s', stderr='%s'", 
+						result2.returncode, result2.stdout.strip(), result2.stderr.strip())
+			
 			if result2.returncode != 0:
 				LOGGER.error("Error converting back to DOCX: %s", result2.stderr)
 				return False
@@ -167,19 +179,19 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 			converted_docx = os.path.join(temp_dir, f"{base_name}.docx")
 			if os.path.exists(converted_docx):
 				shutil.copy2(converted_docx, output_docx_path)
-				LOGGER.info("Successfully converted and saved to: %s", output_docx_path)
+				LOGGER.debug("Successfully converted and saved to: %s", output_docx_path)
 				return True
 			else:
 				LOGGER.error("Converted file not found: %s", converted_docx)
 				# List files in temp directory for debugging
-				LOGGER.debug("Files in temp directory: %s", os.listdir(temp_dir))
+				LOGGER.debug("Files in temp directory after step 2: %s", os.listdir(temp_dir))
 				return False
 				
 	except subprocess.TimeoutExpired:
-		LOGGER.error("Conversion timed out")
+		LOGGER.error("Conversion timed out after %s seconds", cfg.convert_timeout_sec)
 		return False
 	except Exception as e:
-		LOGGER.error("Error during conversion: %s", e)
+		LOGGER.exception("Error during conversion: %s", e)
 		return False
 
 

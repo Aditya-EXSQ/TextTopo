@@ -33,37 +33,38 @@ def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: O
 	
 	try:
 		# Step 1: Convert DOCX via LibreOffice
-		LOGGER.info("Step 1: Converting document via LibreOffice...")
+		LOGGER.debug("Step 1: Converting document via LibreOffice...")
 		try:
 			temp_converted_path = tempfile.mktemp(suffix=".docx")
 			conversion_success = convert_docx_via_libreoffice(input_docx_path, temp_converted_path, cfg=cfg)
 			if conversion_success:
-				LOGGER.info("✅ Conversion successful!")
+				LOGGER.debug("✅ Conversion successful!")
 				converted_file = temp_converted_path
 			else:
 				LOGGER.info("❌ Conversion failed, trying to extract from original file...")
 				converted_file = input_docx_path
 		except Exception as e:
-			LOGGER.error("❌ Conversion error: %s", e)
-			LOGGER.info("Falling back to original file...")
+			LOGGER.warning("❌ Conversion error: %s", e)
+			LOGGER.debug("Falling back to original file...")
 			converted_file = input_docx_path
 		
 		# Step 2: Extract content using python-docx
-		LOGGER.info("Step 2: Extracting content...")
+		LOGGER.debug("Step 2: Extracting content from: %s", converted_file)
 		try:
 			content = extract_content_with_python_docx(converted_file)
-			if content.strip():
-				LOGGER.info("✅ Content extraction successful!")
+			if content and content.strip():
+				LOGGER.debug("✅ Content extraction successful! Length: %d characters", len(content))
 			else:
-				LOGGER.warning("⚠️ Content extraction completed but no text was found")
-				LOGGER.info("The document might be empty or contain only images/formatted content")
+				LOGGER.warning("⚠️ Content extraction completed but no text was found in file: %s", os.path.basename(input_docx_path))
+				LOGGER.debug("The document might be empty or contain only images/formatted content")
+				content = ""
 			
 		except Exception as e:
-			LOGGER.error("❌ Error extracting content: %s", e)
-			LOGGER.error("This might be due to:")
-			LOGGER.error("  - Corrupted document file")
-			LOGGER.error("  - Unsupported document format")
-			LOGGER.error("  - Missing python-docx library")
+			LOGGER.error("❌ Error extracting content from %s: %s", os.path.basename(input_docx_path), e)
+			LOGGER.debug("This might be due to:")
+			LOGGER.debug("  - Corrupted document file")
+			LOGGER.debug("  - Unsupported document format")
+			LOGGER.debug("  - Missing python-docx library")
 			raise
 		
 		# Save extracted content
