@@ -3,7 +3,11 @@ import os
 import shutil
 import subprocess
 import tempfile
-import threading
+import time
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 from typing import List, Optional
 
 from DOCXToText.config import ConversionConfig
@@ -11,18 +15,63 @@ from DOCXToText.config import ConversionConfig
 LOGGER = logging.getLogger(__name__)
 
 
-# Global semaphore to limit concurrent LibreOffice processes
-_libreoffice_semaphore = None
-_semaphore_lock = threading.Lock()
+# Global file lock to completely serialize LibreOffice operations
+_libreoffice_lock_fd = None
+_libreoffice_lock_file = os.path.join(tempfile.gettempdir(), "textopo_libreoffice_global.lock")
 
-def _get_libreoffice_semaphore(max_instances: int = 4):
-	"""Get or create a semaphore that limits concurrent LibreOffice processes."""
-	global _libreoffice_semaphore
-	with _semaphore_lock:
-		if _libreoffice_semaphore is None or _libreoffice_semaphore._value != max_instances:
-			_libreoffice_semaphore = threading.Semaphore(max_instances)
-			LOGGER.debug("Created LibreOffice semaphore with %d max instances", max_instances)
-	return _libreoffice_semaphore
+def _acquire_global_libreoffice_lock(timeout_seconds: int = 300):
+	"""Acquire a global file lock for LibreOffice operations."""
+	global _libreoffice_lock_fd
+	start_time = time.time()
+	
+	while time.time() - start_time < timeout_seconds:
+		try:
+			# Try to create/open the lock file exclusively
+			_libreoffice_lock_fd = os.open(_libreoffice_lock_file, 
+										   os.O_CREAT | os.O_TRUNC | os.O_RDWR)
+			
+			if os.name != 'nt' and fcntl:
+				# Unix-style file locking
+				fcntl.flock(_libreoffice_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+			else:
+				# Windows - just use the file existence as lock
+				pass
+				
+			# Write PID to lock file for debugging
+			os.write(_libreoffice_lock_fd, f"LibreOffice lock - PID: {os.getpid()}\n".encode())
+			LOGGER.debug("Acquired global LibreOffice lock")
+			return True
+			
+		except (OSError, IOError):
+			# Lock is held by another process, wait and retry
+			if _libreoffice_lock_fd:
+				try:
+					os.close(_libreoffice_lock_fd)
+				except:
+					pass
+				_libreoffice_lock_fd = None
+			time.sleep(0.5)
+	
+	LOGGER.warning("Failed to acquire LibreOffice lock within %d seconds", timeout_seconds)
+	return False
+
+def _release_global_libreoffice_lock():
+	"""Release the global LibreOffice lock."""
+	global _libreoffice_lock_fd
+	if _libreoffice_lock_fd:
+		try:
+			if os.name != 'nt' and fcntl:
+				fcntl.flock(_libreoffice_lock_fd, fcntl.LOCK_UN)
+			os.close(_libreoffice_lock_fd)
+			_libreoffice_lock_fd = None
+		except:
+			pass
+		
+		try:
+			os.remove(_libreoffice_lock_file)
+			LOGGER.debug("Released global LibreOffice lock")
+		except:
+			pass
 
 
 def _windows_startupinfo():
@@ -107,16 +156,13 @@ def _find_soffice_executable(cfg: ConversionConfig) -> Optional[str]:
 	return None
 
 
-def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cfg: Optional[ConversionConfig] = None, max_instances: int = 4) -> bool:
+def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cfg: Optional[ConversionConfig] = None, max_instances: int = None) -> bool:
 	"""
 	Convert DOCX to DOC and back to DOCX using LibreOffice CLI to normalize the format.
 	This helps extract content that might not be accessible in the original format.
 	
-	Args:
-		input_docx_path: Path to input DOCX file
-		output_docx_path: Path where converted DOCX will be saved
-		cfg: Configuration object
-		max_instances: Maximum number of concurrent LibreOffice processes
+	NOTE: LibreOffice conversion is completely serialized (one at a time globally) 
+	because LibreOffice cannot handle any parallel processing whatsoever.
 	"""
 	cfg = cfg or ConversionConfig()
 	soffice = _find_soffice_executable(cfg)
@@ -124,16 +170,12 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 		LOGGER.warning("LibreOffice not found. Please install LibreOffice or set SOFFICE_PATH in .env file")
 		return False
 
-	# Use semaphore to limit concurrent LibreOffice processes
-	semaphore = _get_libreoffice_semaphore(max_instances)
-	acquired = semaphore.acquire(timeout=cfg.convert_timeout_sec * 2)
-	if not acquired:
-		LOGGER.warning("Failed to acquire LibreOffice semaphore within timeout")
+	# Acquire global file lock - only one LibreOffice conversion at a time, EVER
+	if not _acquire_global_libreoffice_lock(timeout_seconds=cfg.convert_timeout_sec * 3):
+		LOGGER.error("Could not acquire LibreOffice lock - another conversion in progress")
 		return False
 	
 	try:
-		LOGGER.debug("Acquired LibreOffice semaphore slot (%d/%d active)", 
-					max_instances - semaphore._value, max_instances)
 		
 		# Create temporary directory for conversion
 		with tempfile.TemporaryDirectory() as temp_dir:
@@ -225,9 +267,8 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 		LOGGER.exception("Error during conversion: %s", e)
 		return False
 	finally:
-		# Always release the semaphore
-		semaphore.release()
-		LOGGER.debug("Released LibreOffice semaphore slot")
+		# Always release the global lock
+		_release_global_libreoffice_lock()
 
 
 
