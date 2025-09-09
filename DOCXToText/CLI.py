@@ -47,7 +47,7 @@ def main(argv: Optional[list] = None) -> int:
 			base = os.path.splitext(os.path.basename(args.input_file))[0]
 			out_path = os.path.join(out_dir, f"{base}.txt")
 			os.makedirs(out_dir, exist_ok=True)
-			ok = extract_docx_to_text_file(args.input_file, out_path, cfg=cfg)
+			ok = extract_docx_to_text_file(args.input_file, out_path, cfg=cfg, max_instances=args.workers)
 			return 0 if ok else 1
 
 		if args.input_folder:

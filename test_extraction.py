@@ -45,7 +45,7 @@ def test_single_document(docx_path: str):
     
     try:
         temp_converted_path = tempfile.mktemp(suffix=".docx")
-        conversion_success = convert_docx_via_libreoffice(docx_path, temp_converted_path, cfg=cfg)
+        conversion_success = convert_docx_via_libreoffice(docx_path, temp_converted_path, cfg=cfg, max_instances=1)
         
         if conversion_success:
             print(f"✅ LibreOffice conversion successful!")

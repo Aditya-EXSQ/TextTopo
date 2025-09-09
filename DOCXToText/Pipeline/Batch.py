@@ -11,11 +11,17 @@ from DOCXToText.Extractors.DOCXExtractor import extract_content_with_python_docx
 LOGGER = logging.getLogger(__name__)
 
 
-def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: Optional[ConversionConfig] = None) -> bool:
+def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: Optional[ConversionConfig] = None, max_instances: int = 4) -> bool:
 	"""
 	Extract DOCX document content using the clean two-step process:
 	1. Try LibreOffice conversion for document normalization (optional)
 	2. Extract text using python-docx
+	
+	Args:
+		input_docx_path: Path to input DOCX file
+		output_txt_path: Path where extracted text will be saved
+		cfg: Configuration object
+		max_instances: Maximum number of concurrent LibreOffice processes
 	"""
 	cfg = cfg or ConversionConfig()
 	
@@ -36,7 +42,7 @@ def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: O
 		LOGGER.debug("Step 1: Converting document via LibreOffice...")
 		try:
 			temp_converted_path = tempfile.mktemp(suffix=".docx")
-			conversion_success = convert_docx_via_libreoffice(input_docx_path, temp_converted_path, cfg=cfg)
+			conversion_success = convert_docx_via_libreoffice(input_docx_path, temp_converted_path, cfg=cfg, max_instances=max_instances)
 			if conversion_success:
 				LOGGER.debug("✅ Conversion successful!")
 				converted_file = temp_converted_path
@@ -103,9 +109,9 @@ def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: O
 				pass
 
 
-def _process_single_file(args: Tuple[str, str, ConversionConfig]) -> Tuple[str, bool]:
-	input_path, output_txt, cfg = args
-	ok = extract_docx_to_text_file(input_path, output_txt, cfg=cfg)
+def _process_single_file(args: Tuple[str, str, ConversionConfig, int]) -> Tuple[str, bool]:
+	input_path, output_txt, cfg, max_instances = args
+	ok = extract_docx_to_text_file(input_path, output_txt, cfg=cfg, max_instances=max_instances)
 	return (output_txt, ok)
 
 
@@ -118,7 +124,7 @@ def process_docx_folder(input_folder: str, output_folder: Optional[str] = None, 
 	output_dir = output_folder or input_folder
 	os.makedirs(output_dir, exist_ok=True)
 
-	tasks: List[Tuple[str, str, ConversionConfig]] = []
+	tasks: List[Tuple[str, str, ConversionConfig, int]] = []
 	for name in os.listdir(input_folder):
 		if not name.lower().endswith(".docx"):
 			continue
@@ -127,7 +133,8 @@ def process_docx_folder(input_folder: str, output_folder: Optional[str] = None, 
 		input_path = os.path.join(input_folder, name)
 		base_name = os.path.splitext(name)[0]
 		output_txt = os.path.join(output_dir, f"{base_name}.txt")
-		tasks.append((input_path, output_txt, cfg))
+		# Use workers parameter as max_instances for LibreOffice
+		tasks.append((input_path, output_txt, cfg, workers))
 
 	if not tasks:
 		LOGGER.info("No DOCX files found in '%s'.", input_folder)

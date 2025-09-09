@@ -3,8 +3,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-import time
-from contextlib import contextmanager
+import threading
 from typing import List, Optional
 
 from DOCXToText.config import ConversionConfig
@@ -12,44 +11,18 @@ from DOCXToText.config import ConversionConfig
 LOGGER = logging.getLogger(__name__)
 
 
-@contextmanager
-def _libreoffice_lock(timeout_seconds: int = 300):
-	"""
-	Cross-platform file lock to serialize LibreOffice operations.
-	Multiple concurrent LibreOffice processes cause conversion failures.
-	"""
-	lock_file = os.path.join(tempfile.gettempdir(), "libreoffice_conversion.lock")
-	acquired = False
-	start_time = time.time()
-	
-	try:
-		# Try to acquire lock with timeout
-		while time.time() - start_time < timeout_seconds:
-			try:
-				# Create lock file exclusively (fails if already exists)
-				fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-				os.write(fd, f"LibreOffice lock - PID: {os.getpid()}\n".encode())
-				os.close(fd)
-				acquired = True
-				LOGGER.debug("Acquired LibreOffice conversion lock")
-				break
-			except OSError:
-				# Lock file exists, wait and retry
-				time.sleep(0.5)
-		
-		if not acquired:
-			LOGGER.warning("Failed to acquire LibreOffice lock within %d seconds", timeout_seconds)
-			raise TimeoutError("Could not acquire LibreOffice conversion lock")
-			
-		yield
-		
-	finally:
-		if acquired:
-			try:
-				os.remove(lock_file)
-				LOGGER.debug("Released LibreOffice conversion lock")
-			except OSError:
-				pass  # Lock file might have been removed by another process
+# Global semaphore to limit concurrent LibreOffice processes
+_libreoffice_semaphore = None
+_semaphore_lock = threading.Lock()
+
+def _get_libreoffice_semaphore(max_instances: int = 4):
+	"""Get or create a semaphore that limits concurrent LibreOffice processes."""
+	global _libreoffice_semaphore
+	with _semaphore_lock:
+		if _libreoffice_semaphore is None or _libreoffice_semaphore._value != max_instances:
+			_libreoffice_semaphore = threading.Semaphore(max_instances)
+			LOGGER.debug("Created LibreOffice semaphore with %d max instances", max_instances)
+	return _libreoffice_semaphore
 
 
 def _windows_startupinfo():
@@ -134,10 +107,16 @@ def _find_soffice_executable(cfg: ConversionConfig) -> Optional[str]:
 	return None
 
 
-def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cfg: Optional[ConversionConfig] = None) -> bool:
+def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cfg: Optional[ConversionConfig] = None, max_instances: int = 4) -> bool:
 	"""
 	Convert DOCX to DOC and back to DOCX using LibreOffice CLI to normalize the format.
 	This helps extract content that might not be accessible in the original format.
+	
+	Args:
+		input_docx_path: Path to input DOCX file
+		output_docx_path: Path where converted DOCX will be saved
+		cfg: Configuration object
+		max_instances: Maximum number of concurrent LibreOffice processes
 	"""
 	cfg = cfg or ConversionConfig()
 	soffice = _find_soffice_executable(cfg)
@@ -145,91 +124,99 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 		LOGGER.warning("LibreOffice not found. Please install LibreOffice or set SOFFICE_PATH in .env file")
 		return False
 
-	# Use file lock to serialize LibreOffice operations across processes
+	# Use semaphore to limit concurrent LibreOffice processes
+	semaphore = _get_libreoffice_semaphore(max_instances)
+	acquired = semaphore.acquire(timeout=cfg.convert_timeout_sec * 2)
+	if not acquired:
+		LOGGER.warning("Failed to acquire LibreOffice semaphore within timeout")
+		return False
+	
 	try:
-		with _libreoffice_lock(timeout_seconds=cfg.convert_timeout_sec * 2):
-			# Create temporary directory for conversion
-			with tempfile.TemporaryDirectory() as temp_dir:
-				# Get the base name of the input file without extension
-				base_name = os.path.splitext(os.path.basename(input_docx_path))[0]
-				
-				# Step 1: Convert DOCX to DOC
-				doc_path = os.path.join(temp_dir, f"{base_name}.doc")
-				cmd1 = [
-					soffice,
-					"--headless",
-					"--convert-to", "doc",
-					"--outdir", temp_dir,
-					input_docx_path
-				]
-				
-				LOGGER.debug("Converting DOCX to DOC with command: %s", ' '.join(cmd1))
-				creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-				result1 = subprocess.run(
-					cmd1, 
-					capture_output=True, 
-					text=True, 
-					timeout=cfg.convert_timeout_sec,
-					creationflags=creationflags,
-					startupinfo=_windows_startupinfo()
-				)
-				
-				LOGGER.debug("DOCX->DOC conversion result: returncode=%s, stdout='%s', stderr='%s'", 
-							result1.returncode, result1.stdout.strip(), result1.stderr.strip())
-				
-				if result1.returncode != 0:
-					LOGGER.error("Error converting to DOC: %s", result1.stderr)
-					return False
-				
-				# Check if DOC file was created
-				if not os.path.exists(doc_path):
-					LOGGER.error("DOC file not created: %s", doc_path)
-					# List files in temp directory for debugging
-					LOGGER.debug("Files in temp directory after step 1: %s", os.listdir(temp_dir))
-					return False
-				
-				# Step 2: Convert DOC back to DOCX
-				cmd2 = [
-					soffice,
-					"--headless", 
-					"--convert-to", "docx",
-					"--outdir", temp_dir,
-					doc_path
-				]
-				
-				LOGGER.debug("Converting DOC back to DOCX with command: %s", ' '.join(cmd2))
-				result2 = subprocess.run(
-					cmd2, 
-					capture_output=True, 
-					text=True, 
-					timeout=cfg.convert_timeout_sec,
-					creationflags=creationflags,
-					startupinfo=_windows_startupinfo()
-				)
-				
-				LOGGER.debug("DOC->DOCX conversion result: returncode=%s, stdout='%s', stderr='%s'", 
-							result2.returncode, result2.stdout.strip(), result2.stderr.strip())
-				
-				if result2.returncode != 0:
-					LOGGER.error("Error converting back to DOCX: %s", result2.stderr)
-					return False
-				
-				# Step 3: Delete the intermediate DOC file
-				if os.path.exists(doc_path):
-					os.remove(doc_path)
-					LOGGER.debug("Deleted intermediate DOC file")
-				
-				# Step 4: Copy the converted file to output location
-				converted_docx = os.path.join(temp_dir, f"{base_name}.docx")
-				if os.path.exists(converted_docx):
-					shutil.copy2(converted_docx, output_docx_path)
-					LOGGER.debug("Successfully converted and saved to: %s", output_docx_path)
-					return True
-				else:
-					LOGGER.error("Converted file not found: %s", converted_docx)
-					# List files in temp directory for debugging
-					LOGGER.debug("Files in temp directory after step 2: %s", os.listdir(temp_dir))
-					return False
+		LOGGER.debug("Acquired LibreOffice semaphore slot (%d/%d active)", 
+					max_instances - semaphore._value, max_instances)
+		
+		# Create temporary directory for conversion
+		with tempfile.TemporaryDirectory() as temp_dir:
+			# Get the base name of the input file without extension
+			base_name = os.path.splitext(os.path.basename(input_docx_path))[0]
+			
+			# Step 1: Convert DOCX to DOC
+			doc_path = os.path.join(temp_dir, f"{base_name}.doc")
+			cmd1 = [
+				soffice,
+				"--headless",
+				"--convert-to", "doc",
+				"--outdir", temp_dir,
+				input_docx_path
+			]
+			
+			LOGGER.debug("Converting DOCX to DOC with command: %s", ' '.join(cmd1))
+			creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+			result1 = subprocess.run(
+				cmd1, 
+				capture_output=True, 
+				text=True, 
+				timeout=cfg.convert_timeout_sec,
+				creationflags=creationflags,
+				startupinfo=_windows_startupinfo()
+			)
+			
+			LOGGER.debug("DOCX->DOC conversion result: returncode=%s, stdout='%s', stderr='%s'", 
+						result1.returncode, result1.stdout.strip(), result1.stderr.strip())
+			
+			if result1.returncode != 0:
+				LOGGER.error("Error converting to DOC: %s", result1.stderr)
+				return False
+			
+			# Check if DOC file was created
+			if not os.path.exists(doc_path):
+				LOGGER.error("DOC file not created: %s", doc_path)
+				# List files in temp directory for debugging
+				LOGGER.debug("Files in temp directory after step 1: %s", os.listdir(temp_dir))
+				return False
+			
+			# Step 2: Convert DOC back to DOCX
+			cmd2 = [
+				soffice,
+				"--headless", 
+				"--convert-to", "docx",
+				"--outdir", temp_dir,
+				doc_path
+			]
+			
+			LOGGER.debug("Converting DOC back to DOCX with command: %s", ' '.join(cmd2))
+			result2 = subprocess.run(
+				cmd2, 
+				capture_output=True, 
+				text=True, 
+				timeout=cfg.convert_timeout_sec,
+				creationflags=creationflags,
+				startupinfo=_windows_startupinfo()
+			)
+			
+			LOGGER.debug("DOC->DOCX conversion result: returncode=%s, stdout='%s', stderr='%s'", 
+						result2.returncode, result2.stdout.strip(), result2.stderr.strip())
+			
+			if result2.returncode != 0:
+				LOGGER.error("Error converting back to DOCX: %s", result2.stderr)
+				return False
+			
+			# Step 3: Delete the intermediate DOC file
+			if os.path.exists(doc_path):
+				os.remove(doc_path)
+				LOGGER.debug("Deleted intermediate DOC file")
+			
+			# Step 4: Copy the converted file to output location
+			converted_docx = os.path.join(temp_dir, f"{base_name}.docx")
+			if os.path.exists(converted_docx):
+				shutil.copy2(converted_docx, output_docx_path)
+				LOGGER.debug("Successfully converted and saved to: %s", output_docx_path)
+				return True
+			else:
+				LOGGER.error("Converted file not found: %s", converted_docx)
+				# List files in temp directory for debugging
+				LOGGER.debug("Files in temp directory after step 2: %s", os.listdir(temp_dir))
+				return False
 				
 	except subprocess.TimeoutExpired:
 		LOGGER.error("Conversion timed out after %s seconds", cfg.convert_timeout_sec)
@@ -237,6 +224,10 @@ def convert_docx_via_libreoffice(input_docx_path: str, output_docx_path: str, cf
 	except Exception as e:
 		LOGGER.exception("Error during conversion: %s", e)
 		return False
+	finally:
+		# Always release the semaphore
+		semaphore.release()
+		LOGGER.debug("Released LibreOffice semaphore slot")
 
 
 
