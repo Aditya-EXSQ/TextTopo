@@ -230,6 +230,37 @@ Error: LibreOffice not found. Please install LibreOffice or set SOFFICE_PATH
 export SOFFICE_PATH="/path/to/libreoffice/program/soffice"
 ```
 
+### LibreOffice Interactive Popup
+
+```
+LibreOffice 25.8.1.1 ... Press Enter to continue...
+```
+
+**Problem**: Some LibreOffice installations show interactive prompts despite headless mode.
+
+**Solutions**:
+1. **Recommended**: Use without LibreOffice (still provides excellent text extraction)
+   ```bash
+   python Scripts/Extract.py --input docs/ --output text/
+   ```
+
+2. **Single File Processing**: LibreOffice works better for individual files:
+   ```bash
+   # Process single files with LibreOffice (requires pressing Enter for popup)
+   python Scripts/Extract.py --input document.docx --stdout --enable-libreoffice
+   ```
+
+3. **Batch Processing**: LibreOffice popups interfere with batch processing, so use without:
+   ```bash
+   # Batch processing works reliably without LibreOffice
+   python Scripts/Extract.py --input docs/ --output text/ --concurrency 6
+   ```
+
+4. **Environment Variable**: Disable LibreOffice by default:
+   ```bash
+   set ENABLE_LIBREOFFICE=false
+   ```
+
 ### Conversion Timeout
 
 ```

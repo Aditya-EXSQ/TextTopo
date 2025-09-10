@@ -144,10 +144,15 @@ async def process_files_in_parallel(
         logger.warning("No files provided for processing")
         return {}
     
-    logger.info(f"Processing {len(files)} files with concurrency limit: {config.concurrency_limit}")
+    # Reduce concurrency if LibreOffice is enabled due to popup interference
+    effective_concurrency = 1 if config.enable_libreoffice else config.concurrency_limit
+    logger.info(f"Processing {len(files)} files with concurrency limit: {effective_concurrency}")
+    
+    if config.enable_libreoffice:
+        logger.warning("LibreOffice enabled: Using sequential processing to avoid popup interference")
     
     # Create semaphore to limit concurrency
-    semaphore = asyncio.Semaphore(config.concurrency_limit)
+    semaphore = asyncio.Semaphore(effective_concurrency)
     results = {}
     errors = {}
     
@@ -163,6 +168,11 @@ async def process_files_in_parallel(
                 )
                 results[file_path] = extracted_text
                 logger.info(f"Completed processing: {file_path}")
+                
+                # Add delay between LibreOffice processes to prevent popup interference
+                if config.enable_libreoffice:
+                    await asyncio.sleep(0.5)
+                    
             except Exception as e:
                 error_msg = f"Failed to process {file_path}: {e}"
                 logger.error(error_msg)

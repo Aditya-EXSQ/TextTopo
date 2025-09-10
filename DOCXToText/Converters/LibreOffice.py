@@ -33,6 +33,8 @@ def discover_libreoffice(config: Optional[ConversionConfig] = None) -> Optional[
     
     # Try common LibreOffice installation paths
     possible_paths: List[str] = [
+        r"D:\LibreOffice\program\soffice.bin",
+        r"D:\LibreOffice\program\soffice.com",
         r"D:\LibreOffice\program\soffice.exe",
         r"C:\Program Files\LibreOffice\program\soffice.exe",
         r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
@@ -249,11 +251,12 @@ async def _run_libreoffice_conversion(
                 subprocess.CREATE_NEW_PROCESS_GROUP  # 0x00000200
             )
         
+        # Direct execution with all streams redirected to suppress output
         process = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.DEVNULL,  # Redirect stdout to devnull
-            stderr=asyncio.subprocess.DEVNULL,  # Redirect stderr to devnull  
-            stdin=asyncio.subprocess.DEVNULL,   # Redirect stdin to devnull
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,  
+            stdin=asyncio.subprocess.DEVNULL,
             env=env,
             creationflags=creation_flags
         )

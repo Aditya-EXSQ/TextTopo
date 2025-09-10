@@ -15,7 +15,7 @@ class ConversionConfig:
     # LibreOffice settings
     soffice_path: Optional[str] = None
     conversion_timeout: int = 60  # seconds
-    enable_libreoffice: bool = False  # Disabled by default due to common installation issues
+    enable_libreoffice: bool = False  # Disabled by default due to return code 81 issues
     
     # Processing settings
     concurrency_limit: int = 4
