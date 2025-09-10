@@ -91,7 +91,36 @@ def extract_content(docx_path: str) -> str:
                 return _extract_with_zipfile_fallback(docx_path)
             else:
                 raise e
+        
         all_text = []
+        
+        # Extract headers first
+        for section in document.sections:
+            if section.header.is_linked_to_previous:
+                continue  # Skip if linked to previous section header
+            
+            for paragraph in section.header.paragraphs:
+                header_text = get_paragraph_text_with_fields(paragraph).strip()
+                if header_text:
+                    all_text.append(header_text)
+            
+            # Check for header tables
+            for table in section.header.tables:
+                for row in table.rows:
+                    row_text = []
+                    for cell in row.cells:
+                        cell_text = ""
+                        for paragraph in cell.paragraphs:
+                            cell_text += get_paragraph_text_with_fields(paragraph)
+                        row_text.append(cell_text.strip())
+                    
+                    full_row_text = "\t".join(row_text).strip()
+                    if full_row_text:
+                        all_text.append(full_row_text)
+        
+        # Add separator after headers if any were found
+        if any(text for text in all_text):
+            all_text.append("")
         
         # Regular expression to match placeholder braces and normalize them
         # placeholder_re = re.compile(r"\{\s*([^{}\s].*?)\s*\}")
@@ -120,8 +149,51 @@ def extract_content(docx_path: str) -> str:
                     if full_row_text:
                         all_text.append(full_row_text)
         
+        # Extract footers last
+        footer_added = False
+        for section in document.sections:
+            if section.footer.is_linked_to_previous:
+                continue  # Skip if linked to previous section footer
+            
+            # Add separator before first footer
+            if not footer_added:
+                all_text.append("")
+                footer_added = True
+            
+            for paragraph in section.footer.paragraphs:
+                footer_text = get_paragraph_text_with_fields(paragraph).strip()
+                if footer_text:
+                    all_text.append(footer_text)
+            
+            # Check for footer tables
+            for table in section.footer.tables:
+                for row in table.rows:
+                    row_text = []
+                    for cell in row.cells:
+                        cell_text = ""
+                        for paragraph in cell.paragraphs:
+                            cell_text += get_paragraph_text_with_fields(paragraph)
+                        row_text.append(cell_text.strip())
+                    
+                    full_row_text = "\t".join(row_text).strip()
+                    if full_row_text:
+                        all_text.append(full_row_text)
+        
         extracted_text = '\n'.join(all_text)
-        logger.info(f"Successfully extracted {len(extracted_text)} characters from {docx_path}")
+        
+        # Count headers and footers for logging
+        header_count = sum(1 for section in document.sections if not section.header.is_linked_to_previous and 
+                          (any(p.text.strip() for p in section.header.paragraphs) or section.header.tables))
+        footer_count = sum(1 for section in document.sections if not section.footer.is_linked_to_previous and 
+                          (any(p.text.strip() for p in section.footer.paragraphs) or section.footer.tables))
+        
+        parts_info = ["main document"]
+        if header_count > 0:
+            parts_info.insert(0, f"{header_count} header(s)")
+        if footer_count > 0:
+            parts_info.append(f"{footer_count} footer(s)")
+        
+        logger.info(f"Successfully extracted {len(extracted_text)} characters from {', '.join(parts_info)} from {docx_path}")
         
         return extracted_text
         
@@ -133,31 +205,31 @@ def extract_content(docx_path: str) -> str:
 def _extract_with_zipfile_fallback(docx_path: str) -> str:
     """
     Fallback extraction method for DOCX files with corrupted custom XML.
-    Uses direct XML parsing of the document.xml file.
+    Uses direct XML parsing of document.xml, headers, and footers.
     
     Args:
         docx_path: Path to the DOCX file
         
     Returns:
-        Extracted text content
+        Extracted text content including headers and footers
     """
     logger = get_logger(__name__)
     
     try:
         with zipfile.ZipFile(docx_path, 'r') as zip_file:
-            # Try to read the main document content
-            try:
-                with zip_file.open('word/document.xml') as doc_xml:
-                    tree = ET.parse(doc_xml)
+            all_content = []
+            
+            # DOCX uses the WordProcessingML namespace
+            namespaces = {
+                'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+            }
+            
+            def extract_text_from_xml(xml_content, part_name):
+                """Extract text from XML content"""
+                try:
+                    tree = ET.parse(xml_content)
                     root = tree.getroot()
-                    
-                    # Extract text preserving paragraph structure
                     paragraphs = []
-                    
-                    # DOCX uses the WordProcessingML namespace
-                    namespaces = {
-                        'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-                    }
                     
                     # Process each paragraph separately to preserve structure
                     for para_elem in root.findall('.//w:p', namespaces):
@@ -192,17 +264,73 @@ def _extract_with_zipfile_fallback(docx_path: str) -> str:
                                 if row_text.strip():
                                     paragraphs.append(row_text)
                     
-                    extracted_text = '\n'.join(paragraphs)
-                    
-                    if extracted_text:
-                        logger.info(f"Successfully extracted {len(extracted_text)} characters using fallback method from {docx_path}")
-                        return extracted_text
+                    if paragraphs:
+                        logger.debug(f"Extracted {len(paragraphs)} paragraphs from {part_name}")
+                        return paragraphs
                     else:
-                        logger.warning(f"No text content found in document.xml for {docx_path}")
-                        return ""
+                        return []
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to extract from {part_name}: {e}")
+                    return []
+            
+            # Extract headers first (usually appear at top of document)
+            file_list = zip_file.namelist()
+            header_files = [f for f in file_list if f.startswith('word/header') and f.endswith('.xml')]
+            header_files.sort()  # Process in order
+            
+            for header_file in header_files:
+                try:
+                    with zip_file.open(header_file) as header_xml:
+                        header_content = extract_text_from_xml(header_xml, header_file)
+                        if header_content:
+                            all_content.extend(header_content)
+                            all_content.append("")  # Add separator line after header
+                except Exception as e:
+                    logger.warning(f"Failed to process {header_file}: {e}")
+            
+            # Extract main document content
+            try:
+                with zip_file.open('word/document.xml') as doc_xml:
+                    doc_content = extract_text_from_xml(doc_xml, 'word/document.xml')
+                    if doc_content:
+                        all_content.extend(doc_content)
                         
             except KeyError:
                 logger.error(f"Could not find word/document.xml in {docx_path}")
+                return ""
+            
+            # Extract footers last (usually appear at bottom of document)
+            footer_files = [f for f in file_list if f.startswith('word/footer') and f.endswith('.xml')]
+            footer_files.sort()  # Process in order
+            
+            if footer_files:
+                all_content.append("")  # Add separator line before footer
+                
+            for footer_file in footer_files:
+                try:
+                    with zip_file.open(footer_file) as footer_xml:
+                        footer_content = extract_text_from_xml(footer_xml, footer_file)
+                        if footer_content:
+                            all_content.extend(footer_content)
+                except Exception as e:
+                    logger.warning(f"Failed to process {footer_file}: {e}")
+            
+            # Join all content
+            extracted_text = '\n'.join(all_content).strip()
+            
+            if extracted_text:
+                parts_found = []
+                if header_files:
+                    parts_found.append(f"{len(header_files)} header(s)")
+                parts_found.append("main document")
+                if footer_files:
+                    parts_found.append(f"{len(footer_files)} footer(s)")
+                
+                logger.info(f"Successfully extracted {len(extracted_text)} characters from {', '.join(parts_found)} using fallback method from {docx_path}")
+                return extracted_text
+            else:
+                logger.warning(f"No text content found in any document parts for {docx_path}")
                 return ""
                 
     except Exception as e:
