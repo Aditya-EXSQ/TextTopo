@@ -101,6 +101,16 @@ async def convert_docx_via_libreoffice(
         logger.error(f"Input file does not exist: {input_path}")
         return False
     
+    # Kill any existing LibreOffice processes to prevent GUI interference
+    try:
+        if os.name == 'nt':
+            subprocess.run(['taskkill', '/F', '/IM', 'soffice.exe', '/T'], 
+                         capture_output=True, timeout=5)
+            subprocess.run(['taskkill', '/F', '/IM', 'soffice.bin', '/T'], 
+                         capture_output=True, timeout=5)
+    except:
+        pass  # Ignore errors if processes don't exist
+    
     try:
         # Create temporary directory with unique profile for concurrency safety
         temp_dir = tempfile.mkdtemp(prefix="texttopo_conversion_")
@@ -206,10 +216,11 @@ async def _run_libreoffice_conversion(
         soffice_path,
         f"-env:UserInstallation={profile_path}",
         "--headless",
-        "--invisible",
+        "--invisible", 
         "--nodefault",
-        "--nolockcheck",
+        "--nofirststartwizard",
         "--nologo",
+        "--nolockcheck",
         "--norestore",
         "--convert-to", output_format,
         "--outdir", output_dir,
@@ -217,34 +228,47 @@ async def _run_libreoffice_conversion(
     ]
     
     try:
-        # Set environment to avoid interactive prompts
+        # Set environment to completely suppress interactive behavior
         env = os.environ.copy()
         env['DISPLAY'] = ''  # For Linux systems
+        env['LIBGL_ALWAYS_SOFTWARE'] = '1'  # Force software rendering
+        env['SAL_USE_VCLPLUGIN'] = 'svp'  # Use headless VCL plugin
+        env['SAL_NO_MOUSEGRABS'] = '1'  # Disable mouse grabs
+        env['SAL_QUIET'] = '1'  # Suppress output messages
+        env['SAL_NO_SPLASH'] = '1'  # Disable splash screen
+        env['OOO_DISABLE_RECOVERY'] = '1'  # Disable crash recovery
+        
+        # Use DEVNULL for stdin to prevent any input prompts
+        creation_flags = 0
+        if os.name == 'nt':
+            # Windows flags to completely suppress window creation
+            import subprocess
+            creation_flags = (
+                subprocess.CREATE_NO_WINDOW |  # 0x08000000
+                subprocess.DETACHED_PROCESS |  # 0x00000008
+                subprocess.CREATE_NEW_PROCESS_GROUP  # 0x00000200
+            )
         
         process = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=asyncio.subprocess.PIPE,
-            env=env
+            stdout=asyncio.subprocess.DEVNULL,  # Redirect stdout to devnull
+            stderr=asyncio.subprocess.DEVNULL,  # Redirect stderr to devnull  
+            stdin=asyncio.subprocess.DEVNULL,   # Redirect stdin to devnull
+            env=env,
+            creationflags=creation_flags
         )
         
-        # Close stdin immediately to prevent hanging on prompts
-        if process.stdin:
-            process.stdin.close()
-        
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(),
-            timeout=timeout
-        )
+        # Wait for process to complete (no stdout/stderr to capture)
+        await asyncio.wait_for(process.wait(), timeout=timeout)
         
         if process.returncode != 0:
-            error_msg = stderr.decode().strip() or "Unknown conversion error"
-            logger.error(f"LibreOffice conversion failed: {error_msg}")
-            logger.error(f"LibreOffice stdout: {stdout.decode().strip()}")
+            logger.error(f"LibreOffice conversion failed with return code: {process.returncode}")
             return False
             
         logger.debug(f"LibreOffice conversion successful")
+        
+        # Small delay to ensure process fully terminates
+        await asyncio.sleep(0.1)
         return True
         
     except asyncio.TimeoutError:
