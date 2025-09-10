@@ -8,11 +8,14 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Get project root directory
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 PYCACHE_DIR = PROJECT_ROOT / ".dev" / "pycache"
-TEMP_DIR = PROJECT_ROOT / "texttopo_temp"
+TEMP_DIR = PROJECT_ROOT / "TEMP"
 
 
 def setup_pycache_centralization():
