@@ -11,7 +11,6 @@ from pathlib import Path
 
 from ..config import ConversionConfig
 from ..logging_setup import get_logger
-from ..Converters.LibreOffice import convert_docx_via_libreoffice
 from ..Extractors.DOCXExtractor import extract_content
 
 logger = get_logger("pipeline.batch")
@@ -23,7 +22,7 @@ async def process_file(
     config: Optional[ConversionConfig] = None
 ) -> str:
     """
-    Process a single DOCX file: Convert via LibreOffice, then extract text.
+    Process a single DOCX file using comprehensive XML extraction.
     
     Args:
         input_path: Path to input DOCX file
@@ -31,7 +30,7 @@ async def process_file(
         config: Configuration object
         
     Returns:
-        Extracted text content
+        Extracted text content including headers, main content, footers, and tables
         
     Raises:
         Exception: If processing fails
@@ -49,72 +48,35 @@ async def process_file(
     if not input_path.lower().endswith('.docx'):
         raise ValueError(f"File must be a .docx file: {input_path}")
     
-    # Create temporary working directory in CWD
-    temp_dir = config.get_temp_dir_path()
-    os.makedirs(temp_dir, exist_ok=True)
+    # Extract text content directly from DOCX file
+    logger.debug("Extracting text content...")
+    extracted_text = extract_content(input_path)
     
-    try:
-        # Generate paths
+    if not extracted_text.strip():
+        logger.warning(f"No text content extracted from {input_path}")
+    
+    # Save to output file if output_dir specified
+    if output_dir:
         base_name = os.path.splitext(os.path.basename(input_path))[0]
-        converted_docx_path = os.path.join(temp_dir, f"{base_name}_converted.docx")
+        os.makedirs(output_dir, exist_ok=True)
+        output_file = os.path.join(output_dir, f"{base_name}{config.output_extension}")
         
-        # Step 1: Try LibreOffice conversion (if enabled)
-        if config.enable_libreoffice:
-            logger.debug("Attempting LibreOffice conversion...")
-            conversion_success = await convert_docx_via_libreoffice(
-                input_path=input_path,
-                output_path=converted_docx_path,
-                config=config
-            )
-            
-            # Determine which file to extract from
-            if conversion_success and os.path.exists(converted_docx_path):
-                extraction_path = converted_docx_path
-                logger.info("Using converted file for extraction")
-            else:
-                extraction_path = input_path
-                logger.warning("Conversion failed, extracting from original file")
-        else:
-            logger.debug("LibreOffice conversion disabled, extracting from original file")
-            extraction_path = input_path
+        # Check if output file exists and handle overwrite settings
+        if os.path.exists(output_file) and not config.overwrite_existing:
+            counter = 1
+            while os.path.exists(output_file):
+                output_file = os.path.join(
+                    output_dir, 
+                    f"{base_name}_{counter}{config.output_extension}"
+                )
+                counter += 1
         
-        # Step 2: Extract text content
-        logger.debug("Extracting text content...")
-        extracted_text = extract_content(extraction_path)
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(extracted_text)
         
-        if not extracted_text.strip():
-            logger.warning(f"No text content extracted from {input_path}")
-        
-        # Step 3: Save to output file if output_dir specified
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-            output_file = os.path.join(output_dir, f"{base_name}{config.output_extension}")
-            
-            # Check if output file exists and handle overwrite settings
-            if os.path.exists(output_file) and not config.overwrite_existing:
-                counter = 1
-                while os.path.exists(output_file):
-                    output_file = os.path.join(
-                        output_dir, 
-                        f"{base_name}_{counter}{config.output_extension}"
-                    )
-                    counter += 1
-            
-            with open(output_file, 'w', encoding='utf-8') as f:
-                f.write(extracted_text)
-            
-            logger.info(f"Text saved to: {output_file}")
-        
-        return extracted_text
-        
-    finally:
-        # Clean up converted file
-        if os.path.exists(converted_docx_path):
-            try:
-                os.remove(converted_docx_path)
-                logger.debug("Cleaned up converted file")
-            except Exception as e:
-                logger.warning(f"Failed to cleanup converted file: {e}")
+        logger.info(f"Text saved to: {output_file}")
+    
+    return extracted_text
 
 
 async def process_files_in_parallel(
@@ -144,15 +106,10 @@ async def process_files_in_parallel(
         logger.warning("No files provided for processing")
         return {}
     
-    # Reduce concurrency if LibreOffice is enabled due to popup interference
-    effective_concurrency = 1 if config.enable_libreoffice else config.concurrency_limit
-    logger.info(f"Processing {len(files)} files with concurrency limit: {effective_concurrency}")
-    
-    if config.enable_libreoffice:
-        logger.warning("LibreOffice enabled: Using sequential processing to avoid popup interference")
+    logger.info(f"Processing {len(files)} files with concurrency limit: {config.concurrency_limit}")
     
     # Create semaphore to limit concurrency
-    semaphore = asyncio.Semaphore(effective_concurrency)
+    semaphore = asyncio.Semaphore(config.concurrency_limit)
     results = {}
     errors = {}
     
@@ -168,10 +125,6 @@ async def process_files_in_parallel(
                 )
                 results[file_path] = extracted_text
                 logger.info(f"Completed processing: {file_path}")
-                
-                # Add delay between LibreOffice processes to prevent popup interference
-                if config.enable_libreoffice:
-                    await asyncio.sleep(0.5)
                     
             except Exception as e:
                 error_msg = f"Failed to process {file_path}: {e}"

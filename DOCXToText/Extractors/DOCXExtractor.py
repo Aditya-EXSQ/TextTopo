@@ -80,122 +80,9 @@ def extract_content(docx_path: str) -> str:
     logger.debug(f"Starting text extraction from: {docx_path}")
     
     try:
-        # Try to open the document with error handling for custom XML issues
-        try:
-            document = Document(docx_path)
-        except Exception as e:
-            error_msg = str(e)
-            if "customXML" in error_msg and "archive" in error_msg:
-                logger.warning(f"Document has corrupted custom XML parts, attempting alternative extraction: {docx_path}")
-                # Try to extract using zipfile directly as a fallback
-                return _extract_with_zipfile_fallback(docx_path)
-            else:
-                raise e
-        
-        all_text = []
-        
-        # Extract headers first
-        for section in document.sections:
-            if section.header.is_linked_to_previous:
-                continue  # Skip if linked to previous section header
-            
-            for paragraph in section.header.paragraphs:
-                header_text = get_paragraph_text_with_fields(paragraph).strip()
-                if header_text:
-                    all_text.append(header_text)
-            
-            # Check for header tables
-            for table in section.header.tables:
-                for row in table.rows:
-                    row_text = []
-                    for cell in row.cells:
-                        cell_text = ""
-                        for paragraph in cell.paragraphs:
-                            cell_text += get_paragraph_text_with_fields(paragraph)
-                        row_text.append(cell_text.strip())
-                    
-                    full_row_text = "\t".join(row_text).strip()
-                    if full_row_text:
-                        all_text.append(full_row_text)
-        
-        # Add separator after headers if any were found
-        if any(text for text in all_text):
-            all_text.append("")
-        
-        # Regular expression to match placeholder braces and normalize them
-        # placeholder_re = re.compile(r"\{\s*([^{}\s].*?)\s*\}")
-        
-        for block in iter_block_items(document):
-            if isinstance(block, Paragraph):
-                paragraph_text = get_paragraph_text_with_fields(block).strip()
-                if paragraph_text:
-                    # Replace placeholder braces with just the placeholder name
-                    # paragraph_text = placeholder_re.sub(r'\1', paragraph_text)
-                    all_text.append(paragraph_text)
-                    
-            elif isinstance(block, Table):
-                for row in block.rows:
-                    row_text = []
-                    for cell in row.cells:
-                        cell_text = ""
-                        for paragraph in cell.paragraphs:
-                            cell_text += get_paragraph_text_with_fields(paragraph)
-                        # Replace placeholder braces with just the placeholder name
-                        # cell_text = placeholder_re.sub(r'\1', cell_text).strip()
-                        row_text.append(cell_text)
-                    
-                    # Join cell text with a tab to represent table columns
-                    full_row_text = "\t".join(row_text).strip()
-                    if full_row_text:
-                        all_text.append(full_row_text)
-        
-        # Extract footers last
-        footer_added = False
-        for section in document.sections:
-            if section.footer.is_linked_to_previous:
-                continue  # Skip if linked to previous section footer
-            
-            # Add separator before first footer
-            if not footer_added:
-                all_text.append("")
-                footer_added = True
-            
-            for paragraph in section.footer.paragraphs:
-                footer_text = get_paragraph_text_with_fields(paragraph).strip()
-                if footer_text:
-                    all_text.append(footer_text)
-            
-            # Check for footer tables
-            for table in section.footer.tables:
-                for row in table.rows:
-                    row_text = []
-                    for cell in row.cells:
-                        cell_text = ""
-                        for paragraph in cell.paragraphs:
-                            cell_text += get_paragraph_text_with_fields(paragraph)
-                        row_text.append(cell_text.strip())
-                    
-                    full_row_text = "\t".join(row_text).strip()
-                    if full_row_text:
-                        all_text.append(full_row_text)
-        
-        extracted_text = '\n'.join(all_text)
-        
-        # Count headers and footers for logging
-        header_count = sum(1 for section in document.sections if not section.header.is_linked_to_previous and 
-                          (any(p.text.strip() for p in section.header.paragraphs) or section.header.tables))
-        footer_count = sum(1 for section in document.sections if not section.footer.is_linked_to_previous and 
-                          (any(p.text.strip() for p in section.footer.paragraphs) or section.footer.tables))
-        
-        parts_info = ["main document"]
-        if header_count > 0:
-            parts_info.insert(0, f"{header_count} header(s)")
-        if footer_count > 0:
-            parts_info.append(f"{footer_count} footer(s)")
-        
-        logger.info(f"Successfully extracted {len(extracted_text)} characters from {', '.join(parts_info)} from {docx_path}")
-        
-        return extracted_text
+        # Use the zipfile fallback method as the primary method since it works reliably for all files
+        logger.debug(f"Using comprehensive extraction method for: {docx_path}")
+        return _extract_with_zipfile_fallback(docx_path)
         
     except Exception as e:
         logger.error(f"Failed to extract content from {docx_path}: {e}")
@@ -204,14 +91,14 @@ def extract_content(docx_path: str) -> str:
 
 def _extract_with_zipfile_fallback(docx_path: str) -> str:
     """
-    Fallback extraction method for DOCX files with corrupted custom XML.
-    Uses direct XML parsing of document.xml, headers, and footers.
+    Advanced DOCX extraction using direct XML parsing.
+    Extracts complete document content including headers, footers, tables, and main content.
     
     Args:
         docx_path: Path to the DOCX file
         
     Returns:
-        Extracted text content including headers and footers
+        Extracted text content including headers, main content, footers, and tables
     """
     logger = get_logger(__name__)
     

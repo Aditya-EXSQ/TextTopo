@@ -4,6 +4,7 @@ Provides consistent logging across all modules.
 """
 
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -21,17 +22,29 @@ def setup_logging(config: Optional[ConversionConfig] = None,
     
     Returns:
         Configured logger instance
+        
+    Raises:
+        ValueError: If log level is invalid
     """
     if config is None:
         from .config import default_config
         config = default_config
     
+    # Validate log level
+    valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    if config.log_level not in valid_levels:
+        raise ValueError(f"Invalid log level: {config.log_level}. Must be one of: {', '.join(valid_levels)}")
+    
     # Create logger
     logger = logging.getLogger("texttopo")
-    logger.setLevel(getattr(logging, config.log_level, logging.INFO))
+    log_level = getattr(logging, config.log_level)
+    logger.setLevel(log_level)
     
-    # Clear any existing handlers
+    # Clear any existing handlers to avoid duplicates
     logger.handlers.clear()
+    
+    # Prevent propagation to root logger to avoid duplicate messages
+    logger.propagate = False
     
     # Create formatter
     formatter = logging.Formatter(
@@ -41,16 +54,24 @@ def setup_logging(config: Optional[ConversionConfig] = None,
     
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(getattr(logging, config.log_level, logging.INFO))
+    console_handler.setLevel(log_level)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
     
     # File handler (if specified)
     if log_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(getattr(logging, config.log_level, logging.INFO))
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        try:
+            # Ensure directory exists
+            log_dir = os.path.dirname(log_file)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        except (OSError, IOError) as e:
+            logger.warning(f"Could not create log file {log_file}: {e}")
     
     return logger
 

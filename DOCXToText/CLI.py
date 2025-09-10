@@ -66,12 +66,6 @@ Examples:
         help="Maximum number of concurrent conversions (default: 4)"
     )
     
-    parser.add_argument(
-        "--timeout", "-t",
-        type=int,
-        default=60,
-        help="Conversion timeout in seconds (default: 60)"
-    )
     
     parser.add_argument(
         "--no-recursive", "-nr",
@@ -85,18 +79,6 @@ Examples:
         help="Overwrite existing output files"
     )
     
-    # LibreOffice configuration
-    parser.add_argument(
-        "--enable-libreoffice",
-        action="store_true",
-        help="Enable LibreOffice conversion (disabled by default due to common installation issues)"
-    )
-    
-    parser.add_argument(
-        "--soffice-path",
-        type=str,
-        help="Path to LibreOffice soffice executable"
-    )
     
     # Logging options
     parser.add_argument(
@@ -149,19 +131,12 @@ def validate_arguments(args: argparse.Namespace) -> None:
         logger.error("Concurrency must be at least 1")
         sys.exit(1)
     
-    # Validate timeout
-    if args.timeout < 1:
-        logger.error("Timeout must be at least 1 second")
-        sys.exit(1)
 
 
 async def main_async(args: argparse.Namespace) -> None:
     """Main async function for processing files."""
     # Create configuration from arguments
     config = ConversionConfig(
-        soffice_path=args.soffice_path,
-        conversion_timeout=args.timeout,
-        enable_libreoffice=args.enable_libreoffice,
         concurrency_limit=args.concurrency,
         temp_dir_name=args.temp_dir,
         overwrite_existing=args.overwrite,

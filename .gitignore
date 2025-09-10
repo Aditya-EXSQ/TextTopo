@@ -1,12 +1,26 @@
-/.venv
+# Virtual environment
+/.venv/
 
+# Python cache files (centralized approach)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
 
-/DOCXToText/__pycache__
-/DOCXToText/Converters/__pycache__
-/DOCXToText/Extractors/__pycache__
-/DOCXToText/Pipeline/__pycache__
+# Development and temp directories  
+.dev/
+texttopo_temp/
 
+# Log files
+*.log
 
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Document files (test data)
 *.docx
 *.doc
 *.pdf
@@ -19,5 +33,15 @@
 *.pptx
 *.ppt
 
+# Test data directory
+/Data/
 
-/Data
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
