@@ -1,69 +1,269 @@
+"""
+Command Line Interface for TextTopo.
+Provides CLI functionality for single file and batch folder processing.
+"""
+
 import argparse
-import logging
+import asyncio
 import os
 import sys
-from typing import Optional
+from pathlib import Path
+from typing import List, Optional
 
-from DOCXToText.config import ConversionConfig
-from DOCXToText.logging_setup import configure_logging
-from DOCXToText.Pipeline.Batch import process_docx_folder, extract_docx_to_text_file
+from .config import ConversionConfig
+from .logging_setup import setup_logging, get_logger
+from .Pipeline.Batch import process_file, process_files_in_parallel, find_docx_files
 
-LOGGER = logging.getLogger(__name__)
-
-
-def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
-	parser = argparse.ArgumentParser(description="Normalize DOCX via LibreOffice and extract text to .txt.")
-	parser.add_argument("--input-file", type=str, help="Path to a single .docx file to extract.")
-	parser.add_argument("--input-folder", type=str, help="Path to a folder containing .docx files to extract.")
-	parser.add_argument("--output-folder", type=str, help="Destination folder for .txt outputs (defaults to input location).")
-	parser.add_argument("--soffice", type=str, default=os.getenv("SOFFICE_PATH"), help="Path to LibreOffice soffice executable.")
-	parser.add_argument("--convert-timeout-sec", type=int, default=int(os.getenv("CONVERT_TIMEOUT_SEC", "60")), help="Timeout for each conversion step.")
-	parser.add_argument("--version-timeout-sec", type=int, default=int(os.getenv("VERSION_TIMEOUT_SEC", "10")), help="Timeout when probing LibreOffice version.")
-	parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (repeat for more detail, e.g. -vv).")
-
-	args = parser.parse_args(argv)
-	if not args.input_file and not args.input_folder:
-		parser.error("Provide either --input-file or --input-folder")
-	return args
+logger = get_logger("cli")
 
 
-def main(argv: Optional[list] = None) -> int:
-	args = parse_args(argv)
-	configure_logging(args.verbose)
+def create_parser() -> argparse.ArgumentParser:
+    """Create and configure the argument parser."""
+    parser = argparse.ArgumentParser(
+        description="TextTopo: Extract text from DOCX files via LibreOffice conversion",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Process single file
+  python -m DOCXToText.CLI --input document.docx --output ./extracted/
 
-	cfg = ConversionConfig(
-		soffice_path=args.soffice,
-		convert_timeout_sec=args.convert_timeout_sec,
-		version_timeout_sec=args.version_timeout_sec,
-	)
+  # Process entire folder
+  python -m DOCXToText.CLI --input ./documents/ --output ./extracted/
 
-	try:
-		if args.input_file:
-			if not os.path.isfile(args.input_file):
-				LOGGER.error("Input file does not exist: %s", args.input_file)
-				return 2
-			out_dir = args.output_folder or os.path.dirname(os.path.abspath(args.input_file)) or "."
-			base = os.path.splitext(os.path.basename(args.input_file))[0]
-			out_path = os.path.join(out_dir, f"{base}.txt")
-			os.makedirs(out_dir, exist_ok=True)
-			ok = extract_docx_to_text_file(args.input_file, out_path, cfg=cfg)
-			return 0 if ok else 1
+  # Process with custom settings
+  python -m DOCXToText.CLI --input ./docs/ --output ./text/ --concurrency 8 --log-level DEBUG
 
-		if args.input_folder:
-			count = process_docx_folder(args.input_folder, args.output_folder, cfg=cfg)
-			return 0 if count > 0 else 1
+  # Process single file and print to stdout
+  python -m DOCXToText.CLI --input document.docx --stdout
+        """
+    )
+    
+    # Input/Output arguments
+    parser.add_argument(
+        "--input", "-i",
+        type=str,
+        required=True,
+        help="Input DOCX file or directory containing DOCX files"
+    )
+    
+    parser.add_argument(
+        "--output", "-o",
+        type=str,
+        help="Output directory for extracted text files (required unless --stdout is used)"
+    )
+    
+    parser.add_argument(
+        "--stdout",
+        action="store_true",
+        help="Print extracted text to stdout instead of saving to files (single file only)"
+    )
+    
+    # Processing options
+    parser.add_argument(
+        "--concurrency", "-c",
+        type=int,
+        default=4,
+        help="Maximum number of concurrent conversions (default: 4)"
+    )
+    
+    parser.add_argument(
+        "--timeout", "-t",
+        type=int,
+        default=60,
+        help="Conversion timeout in seconds (default: 60)"
+    )
+    
+    parser.add_argument(
+        "--no-recursive", "-nr",
+        action="store_true",
+        help="Don't search subdirectories when input is a folder"
+    )
+    
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing output files"
+    )
+    
+    # LibreOffice configuration
+    parser.add_argument(
+        "--enable-libreoffice",
+        action="store_true",
+        help="Enable LibreOffice conversion (disabled by default due to common installation issues)"
+    )
+    
+    parser.add_argument(
+        "--soffice-path",
+        type=str,
+        help="Path to LibreOffice soffice executable"
+    )
+    
+    # Logging options
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Set the logging level (default: INFO)"
+    )
+    
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        help="Write logs to file in addition to console"
+    )
+    
+    # Temporary directory
+    parser.add_argument(
+        "--temp-dir",
+        type=str,
+        default="texttopo_temp",
+        help="Name of temporary directory in current working directory (default: texttopo_temp)"
+    )
+    
+    return parser
 
-	except ValueError as ve:
-		LOGGER.error(str(ve))
-		return 2
-	except Exception as exc:
-		LOGGER.exception("Unexpected error: %s", exc)
-		return 3
 
-	return 0
+def validate_arguments(args: argparse.Namespace) -> None:
+    """Validate command line arguments."""
+    # Check input exists
+    if not os.path.exists(args.input):
+        logger.error(f"Input path does not exist: {args.input}")
+        sys.exit(1)
+    
+    # Check output requirements
+    if not args.stdout and not args.output:
+        logger.error("Either --output or --stdout must be specified")
+        sys.exit(1)
+    
+    if args.stdout and args.output:
+        logger.error("Cannot use both --output and --stdout")
+        sys.exit(1)
+    
+    # Check stdout is only for single files
+    if args.stdout and os.path.isdir(args.input):
+        logger.error("--stdout can only be used with single file input")
+        sys.exit(1)
+    
+    # Validate concurrency
+    if args.concurrency < 1:
+        logger.error("Concurrency must be at least 1")
+        sys.exit(1)
+    
+    # Validate timeout
+    if args.timeout < 1:
+        logger.error("Timeout must be at least 1 second")
+        sys.exit(1)
+
+
+async def main_async(args: argparse.Namespace) -> None:
+    """Main async function for processing files."""
+    # Create configuration from arguments
+    config = ConversionConfig(
+        soffice_path=args.soffice_path,
+        conversion_timeout=args.timeout,
+        enable_libreoffice=args.enable_libreoffice,
+        concurrency_limit=args.concurrency,
+        temp_dir_name=args.temp_dir,
+        overwrite_existing=args.overwrite,
+        log_level=args.log_level
+    )
+    
+    # Determine input files
+    if os.path.isfile(args.input):
+        if not args.input.lower().endswith('.docx'):
+            logger.error("Input file must be a .docx file")
+            sys.exit(1)
+        files = [args.input]
+    else:
+        # Directory input
+        recursive = not args.no_recursive
+        files = find_docx_files(args.input, recursive=recursive)
+        
+        if not files:
+            logger.error(f"No DOCX files found in {args.input}")
+            sys.exit(1)
+        
+        logger.info(f"Found {len(files)} DOCX files to process")
+    
+    try:
+        if len(files) == 1 and args.stdout:
+            # Single file to stdout
+            logger.info(f"Processing file: {files[0]}")
+            extracted_text = await process_file(
+                input_path=files[0],
+                output_dir=None,
+                config=config
+            )
+            print(extracted_text)
+        else:
+            # Process files to output directory
+            if args.output:
+                os.makedirs(args.output, exist_ok=True)
+            
+            if len(files) == 1:
+                # Single file
+                logger.info(f"Processing file: {files[0]}")
+                await process_file(
+                    input_path=files[0],
+                    output_dir=args.output,
+                    config=config
+                )
+            else:
+                # Multiple files
+                logger.info(f"Processing {len(files)} files in parallel")
+                await process_files_in_parallel(
+                    files=files,
+                    output_dir=args.output,
+                    config=config
+                )
+            
+        logger.info("Processing completed successfully")
+        
+    except KeyboardInterrupt:
+        logger.warning("Processing interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Processing failed: {e}")
+        sys.exit(1)
+    finally:
+        # Clean up temporary directory
+        temp_dir = config.get_temp_dir_path()
+        if os.path.exists(temp_dir):
+            try:
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                logger.debug("Cleaned up temporary directory")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temporary directory: {e}")
+
+
+def main() -> None:
+    """Main CLI entry point."""
+    # Parse arguments
+    parser = create_parser()
+    args = parser.parse_args()
+    
+    # Setup logging
+    config = ConversionConfig(log_level=args.log_level)
+    setup_logging(config, args.log_file)
+    
+    # Validate arguments
+    validate_arguments(args)
+    
+    # Show banner
+    logger.info("TextTopo - DOCX Text Extraction Tool")
+    logger.info(f"Input: {args.input}")
+    if args.output:
+        logger.info(f"Output: {args.output}")
+    logger.info(f"Concurrency: {args.concurrency}")
+    
+    # Run async main
+    try:
+        asyncio.run(main_async(args))
+    except KeyboardInterrupt:
+        logger.warning("Interrupted by user")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-	sys.exit(main())
-
-
+    main()

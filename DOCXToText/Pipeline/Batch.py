@@ -1,150 +1,222 @@
-import logging
+"""
+Batch processing pipeline for TextTopo.
+Handles single file and parallel multi-file processing.
+"""
+
 import os
-import tempfile
-from typing import List, Optional, Tuple
+import asyncio
+import shutil
+from typing import Dict, List, Optional
+from pathlib import Path
 
-from DOCXToText.config import ConversionConfig
-from DOCXToText.Converters.LibreOffice import convert_docx_via_libreoffice
-from DOCXToText.Extractors.DOCXExtractor import extract_content_with_python_docx
+from ..config import ConversionConfig
+from ..logging_setup import get_logger
+from ..Converters.LibreOffice import convert_docx_via_libreoffice
+from ..Extractors.DOCXExtractor import extract_content
 
-LOGGER = logging.getLogger(__name__)
-
-
-def extract_docx_to_text_file(input_docx_path: str, output_txt_path: str, cfg: Optional[ConversionConfig] = None) -> bool:
-	"""
-	Extract DOCX document content using the clean two-step process:
-	1. Try LibreOffice conversion for document normalization (optional, ALWAYS single-threaded)
-	2. Extract text using python-docx
-	
-	Args:
-		input_docx_path: Path to input DOCX file
-		output_txt_path: Path where extracted text will be saved
-		cfg: Configuration object
-	"""
-	cfg = cfg or ConversionConfig()
-	
-	LOGGER.info("=== DOCUMENT CONTENT EXTRACTION WITH LIBREOFFICE CONVERSION ===")
-	
-	# Check if input file exists
-	if not os.path.isfile(input_docx_path):
-		LOGGER.error("Input file not found: %s", input_docx_path)
-		return False
-	
-	# Prepare temp path for converted docx
-	temp_converted_path = None
-	conversion_success = False
-	converted_file = input_docx_path
-	
-	try:
-		# Step 1: Convert DOCX via LibreOffice
-		LOGGER.debug("Step 1: Converting document via LibreOffice...")
-		try:
-			# Create temp file in current working directory for easier debugging
-			temp_converted_path = tempfile.mktemp(suffix=".docx", dir=".")
-			conversion_success = convert_docx_via_libreoffice(input_docx_path, temp_converted_path, cfg=cfg)
-			if conversion_success:
-				LOGGER.debug("✅ Conversion successful!")
-				converted_file = temp_converted_path
-			else:
-				LOGGER.info("❌ Conversion failed, trying to extract from original file...")
-				converted_file = input_docx_path
-		except Exception as e:
-			error_msg = str(e).lower()
-			if "bootstrap.ini" in error_msg or "corrupt" in error_msg:
-				LOGGER.error("❌ LibreOffice installation is corrupted (bootstrap.ini issue)")
-				LOGGER.error("💡 Please repair LibreOffice: Settings → Apps → LibreOffice → Repair")
-				LOGGER.info("📄 Continuing with original file extraction...")
-			else:
-				LOGGER.warning("❌ Conversion error: %s", e)
-			LOGGER.debug("Falling back to original file...")
-			converted_file = input_docx_path
-		
-		# Step 2: Extract content using python-docx
-		LOGGER.debug("Step 2: Extracting content from: %s", converted_file)
-		try:
-			content = extract_content_with_python_docx(converted_file)
-			if content and content.strip():
-				LOGGER.debug("✅ Content extraction successful! Length: %d characters", len(content))
-			else:
-				LOGGER.warning("⚠️ Content extraction completed but no text was found in file: %s", os.path.basename(input_docx_path))
-				LOGGER.debug("The document might be empty or contain only images/formatted content")
-				content = ""
-			
-		except Exception as e:
-			LOGGER.error("❌ Error extracting content from %s: %s", os.path.basename(input_docx_path), e)
-			LOGGER.debug("This might be due to:")
-			LOGGER.debug("  - Corrupted document file")
-			LOGGER.debug("  - Unsupported document format")
-			LOGGER.debug("  - Missing python-docx library")
-			raise
-		
-		# Save extracted content
-		os.makedirs(os.path.dirname(output_txt_path) or ".", exist_ok=True)
-		with open(output_txt_path, "w", encoding="utf-8") as fh:
-			fh.write(content or "")
-		
-		LOGGER.info("✅ Successfully extracted: %s -> %s (%d chars)", 
-				   os.path.basename(input_docx_path), 
-				   os.path.basename(output_txt_path),
-				   len(content))
-		
-		# Note about LibreOffice
-		if not conversion_success:
-			LOGGER.debug("💡 Tip: Install LibreOffice to enable document conversion for better text extraction")
-		
-		return True
-		
-	except Exception as exc:
-		LOGGER.exception("Failed to extract '%s' -> '%s': %s", input_docx_path, output_txt_path, exc)
-		try:
-			os.makedirs(os.path.dirname(output_txt_path) or ".", exist_ok=True)
-			with open(output_txt_path, "w", encoding="utf-8") as fh:
-				fh.write("")
-		except Exception:
-			pass
-		return False
-	
-	finally:
-		# Clean up temporary converted file
-		if conversion_success and temp_converted_path and os.path.exists(temp_converted_path):
-			try:
-				os.remove(temp_converted_path)
-				LOGGER.debug("Deleted temp converted file: %s", temp_converted_path)
-			except OSError:
-				pass
+logger = get_logger("pipeline.batch")
 
 
-def process_docx_folder(input_folder: str, output_folder: Optional[str] = None, cfg: Optional[ConversionConfig] = None) -> int:
-	"""Process all .docx files in a folder sequentially."""
-	if not os.path.isdir(input_folder):
-		raise ValueError(f"Input folder not found: {input_folder}")
+async def process_file(
+    input_path: str, 
+    output_dir: Optional[str] = None,
+    config: Optional[ConversionConfig] = None
+) -> str:
+    """
+    Process a single DOCX file: Convert via LibreOffice, then extract text.
+    
+    Args:
+        input_path: Path to input DOCX file
+        output_dir: Directory to save extracted text (if None, returns text only)
+        config: Configuration object
+        
+    Returns:
+        Extracted text content
+        
+    Raises:
+        Exception: If processing fails
+    """
+    if config is None:
+        from ..config import default_config
+        config = default_config
+    
+    logger.info(f"Processing file: {input_path}")
+    
+    # Validate input
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    
+    if not input_path.lower().endswith('.docx'):
+        raise ValueError(f"File must be a .docx file: {input_path}")
+    
+    # Create temporary working directory in CWD
+    temp_dir = config.get_temp_dir_path()
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    try:
+        # Generate paths
+        base_name = os.path.splitext(os.path.basename(input_path))[0]
+        converted_docx_path = os.path.join(temp_dir, f"{base_name}_converted.docx")
+        
+        # Step 1: Try LibreOffice conversion (if enabled)
+        if config.enable_libreoffice:
+            logger.debug("Attempting LibreOffice conversion...")
+            conversion_success = await convert_docx_via_libreoffice(
+                input_path=input_path,
+                output_path=converted_docx_path,
+                config=config
+            )
+            
+            # Determine which file to extract from
+            if conversion_success and os.path.exists(converted_docx_path):
+                extraction_path = converted_docx_path
+                logger.info("Using converted file for extraction")
+            else:
+                extraction_path = input_path
+                logger.warning("Conversion failed, extracting from original file")
+        else:
+            logger.debug("LibreOffice conversion disabled, extracting from original file")
+            extraction_path = input_path
+        
+        # Step 2: Extract text content
+        logger.debug("Extracting text content...")
+        extracted_text = extract_content(extraction_path)
+        
+        if not extracted_text.strip():
+            logger.warning(f"No text content extracted from {input_path}")
+        
+        # Step 3: Save to output file if output_dir specified
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            output_file = os.path.join(output_dir, f"{base_name}{config.output_extension}")
+            
+            # Check if output file exists and handle overwrite settings
+            if os.path.exists(output_file) and not config.overwrite_existing:
+                counter = 1
+                while os.path.exists(output_file):
+                    output_file = os.path.join(
+                        output_dir, 
+                        f"{base_name}_{counter}{config.output_extension}"
+                    )
+                    counter += 1
+            
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(extracted_text)
+            
+            logger.info(f"Text saved to: {output_file}")
+        
+        return extracted_text
+        
+    finally:
+        # Clean up converted file
+        if os.path.exists(converted_docx_path):
+            try:
+                os.remove(converted_docx_path)
+                logger.debug("Cleaned up converted file")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup converted file: {e}")
 
-	cfg = cfg or ConversionConfig()
-	output_dir = output_folder or input_folder
-	os.makedirs(output_dir, exist_ok=True)
 
-	tasks: List[Tuple[str, str]] = []
-	for name in os.listdir(input_folder):
-		if not name.lower().endswith(".docx"):
-			continue
-		if name.startswith("~$"):
-			continue
-		input_path = os.path.join(input_folder, name)
-		base_name = os.path.splitext(name)[0]
-		output_txt = os.path.join(output_dir, f"{base_name}.txt")
-		tasks.append((input_path, output_txt))
+async def process_files_in_parallel(
+    files: List[str], 
+    output_dir: Optional[str] = None,
+    config: Optional[ConversionConfig] = None
+) -> Dict[str, str]:
+    """
+    Process multiple DOCX files in parallel with concurrency control.
+    
+    Args:
+        files: List of paths to DOCX files
+        output_dir: Directory to save extracted text files
+        config: Configuration object
+        
+    Returns:
+        Dictionary mapping input file paths to extracted text content
+        
+    Raises:
+        Exception: If processing fails for all files
+    """
+    if config is None:
+        from ..config import default_config
+        config = default_config
+    
+    if not files:
+        logger.warning("No files provided for processing")
+        return {}
+    
+    logger.info(f"Processing {len(files)} files with concurrency limit: {config.concurrency_limit}")
+    
+    # Create semaphore to limit concurrency
+    semaphore = asyncio.Semaphore(config.concurrency_limit)
+    results = {}
+    errors = {}
+    
+    async def process_with_semaphore(file_path: str) -> None:
+        """Process a single file with semaphore control."""
+        async with semaphore:
+            try:
+                logger.debug(f"Starting processing: {file_path}")
+                extracted_text = await process_file(
+                    input_path=file_path,
+                    output_dir=output_dir,
+                    config=config
+                )
+                results[file_path] = extracted_text
+                logger.info(f"Completed processing: {file_path}")
+            except Exception as e:
+                error_msg = f"Failed to process {file_path}: {e}"
+                logger.error(error_msg)
+                errors[file_path] = str(e)
+    
+    # Create tasks for all files
+    tasks = [process_with_semaphore(file_path) for file_path in files]
+    
+    # Execute all tasks
+    await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Log summary
+    success_count = len(results)
+    error_count = len(errors)
+    
+    logger.info(f"Processing completed: {success_count} successful, {error_count} failed")
+    
+    if errors:
+        logger.error("Errors encountered:")
+        for file_path, error in errors.items():
+            logger.error(f"  {file_path}: {error}")
+    
+    if not results:
+        raise Exception("All files failed to process")
+    
+    return results
 
-	if not tasks:
-		LOGGER.info("No DOCX files found in '%s'.", input_folder)
-		return 0
 
-	processed = 0
-	for input_path, output_txt in tasks:
-		ok = extract_docx_to_text_file(input_path, output_txt, cfg=cfg)
-		if ok:
-			processed += 1
-
-	LOGGER.info("Processed %d/%d DOCX file(s) from '%s' into '%s'.", processed, len(tasks), input_folder, output_dir)
-	return processed
-
-
+def find_docx_files(directory: str, recursive: bool = True) -> List[str]:
+    """
+    Find all DOCX files in a directory.
+    
+    Args:
+        directory: Directory to search
+        recursive: Whether to search subdirectories
+        
+    Returns:
+        List of DOCX file paths
+    """
+    docx_files = []
+    
+    if not os.path.exists(directory):
+        logger.error(f"Directory not found: {directory}")
+        return docx_files
+    
+    if recursive:
+        for root, dirs, files in os.walk(directory):
+            for file in files:
+                if file.lower().endswith('.docx') and not file.startswith('~$'):
+                    docx_files.append(os.path.join(root, file))
+    else:
+        for file in os.listdir(directory):
+            if file.lower().endswith('.docx') and not file.startswith('~$'):
+                docx_files.append(os.path.join(directory, file))
+    
+    logger.info(f"Found {len(docx_files)} DOCX files in {directory}")
+    return sorted(docx_files)
